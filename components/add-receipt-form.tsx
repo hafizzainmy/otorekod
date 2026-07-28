@@ -1,8 +1,8 @@
 "use client";
 
-import { useState } from "react";
+import { useRef, useState } from "react";
 import { useRouter } from "next/navigation";
-import { Loader2, Plus } from "lucide-react";
+import { Camera, Loader2, Plus, Sparkles } from "lucide-react";
 import { createClient } from "@/lib/supabase/client";
 
 type AddReceiptFormProps = {
@@ -11,15 +11,26 @@ type AddReceiptFormProps = {
   currentOdometer: number;
 };
 
+type ScanResult = {
+  service_date: string | null;
+  odometer: number | null;
+  workshop_name: string | null;
+  total_amount: number | null;
+  items_summary: string | null;
+};
+
 export function AddReceiptForm({
   vehicleId,
   userId,
   currentOdometer,
 }: AddReceiptFormProps) {
   const router = useRouter();
+  const fileInputRef = useRef<HTMLInputElement>(null);
   const [open, setOpen] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [scanning, setScanning] = useState(false);
   const [error, setError] = useState<string | null>(null);
+  const [scanSuccess, setScanSuccess] = useState<string | null>(null);
   const [serviceDate, setServiceDate] = useState(
     new Date().toISOString().split("T")[0]
   );
@@ -28,10 +39,92 @@ export function AddReceiptForm({
   const [totalAmount, setTotalAmount] = useState("");
   const [itemsSummary, setItemsSummary] = useState("");
 
+  async function handleScan(file: File) {
+    setScanning(true);
+    setError(null);
+    setScanSuccess(null);
+
+    const reader = new FileReader();
+
+    reader.onload = async () => {
+      try {
+        const dataUrl = reader.result as string;
+        const base64 = dataUrl.split(",")[1] ?? dataUrl;
+        const mimeType = file.type || "image/jpeg";
+
+        const response = await fetch("/api/scan", {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify({ image: base64, mimeType }),
+        });
+
+        const data = (await response.json()) as ScanResult & { error?: string };
+
+        if (!response.ok) {
+          throw new Error(data.error ?? "Failed to scan receipt.");
+        }
+
+        if (data.service_date) {
+          setServiceDate(data.service_date);
+        }
+        if (data.odometer !== null) {
+          setOdometer(String(data.odometer));
+        }
+        if (data.workshop_name) {
+          setWorkshopName(data.workshop_name);
+        }
+        if (data.total_amount !== null) {
+          setTotalAmount(String(data.total_amount));
+        }
+        if (data.items_summary) {
+          setItemsSummary(data.items_summary);
+        }
+
+        setScanSuccess(
+          "Receipt read successfully! Please verify and edit details before saving."
+        );
+      } catch (scanError) {
+        setError(
+          scanError instanceof Error
+            ? scanError.message
+            : "Failed to scan receipt."
+        );
+      } finally {
+        setScanning(false);
+        if (fileInputRef.current) {
+          fileInputRef.current.value = "";
+        }
+      }
+    };
+
+    reader.onerror = () => {
+      setError("Could not read the selected image.");
+      setScanning(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    };
+
+    reader.readAsDataURL(file);
+  }
+
+  function handleFileChange(event: React.ChangeEvent<HTMLInputElement>) {
+    const file = event.target.files?.[0];
+    if (file) {
+      void handleScan(file);
+    }
+  }
+
+  function handleScanClick() {
+    setOpen(true);
+    fileInputRef.current?.click();
+  }
+
   async function handleSubmit(event: React.FormEvent) {
     event.preventDefault();
-    setLoading(true);
+    setSaving(true);
     setError(null);
+    setScanSuccess(null);
 
     const odometerValue = Number(odometer);
     const supabase = createClient();
@@ -48,7 +141,7 @@ export function AddReceiptForm({
 
     if (insertError) {
       setError(insertError.message);
-      setLoading(false);
+      setSaving(false);
       return;
     }
 
@@ -63,7 +156,7 @@ export function AddReceiptForm({
     setTotalAmount("");
     setItemsSummary("");
     setOpen(false);
-    setLoading(false);
+    setSaving(false);
     router.refresh();
   }
 
@@ -80,6 +173,41 @@ export function AddReceiptForm({
 
       {open && (
         <form onSubmit={handleSubmit} className="space-y-3 border-t border-slate-200 px-3 pb-3 pt-3">
+          <input
+            ref={fileInputRef}
+            type="file"
+            accept="image/*"
+            capture="environment"
+            className="hidden"
+            onChange={handleFileChange}
+          />
+
+          <button
+            type="button"
+            onClick={handleScanClick}
+            disabled={scanning || saving}
+            className="flex w-full items-center justify-center gap-2 rounded-xl border border-blue-200 bg-blue-50 px-4 py-3 text-sm font-semibold text-blue-700 transition-colors hover:bg-blue-100 disabled:cursor-not-allowed disabled:opacity-60"
+          >
+            {scanning ? (
+              <>
+                <Loader2 className="h-4 w-4 animate-spin" />
+                OtoRekod AI reading receipt...
+              </>
+            ) : (
+              <>
+                <Camera className="h-4 w-4" />
+                Scan Receipt with AI
+              </>
+            )}
+          </button>
+
+          {scanSuccess && (
+            <p className="flex items-start gap-2 rounded-xl bg-emerald-50 px-3 py-2.5 text-xs text-emerald-800">
+              <Sparkles className="mt-0.5 h-3.5 w-3.5 shrink-0" />
+              {scanSuccess}
+            </p>
+          )}
+
           <div>
             <label htmlFor={`date-${vehicleId}`} className="mb-1 block text-xs font-medium text-slate-600">
               Service Date
@@ -159,8 +287,8 @@ export function AddReceiptForm({
             <p className="rounded-lg bg-red-50 px-3 py-2 text-xs text-red-700">{error}</p>
           )}
 
-          <button type="submit" disabled={loading} className="btn-primary w-full text-sm">
-            {loading && <Loader2 className="h-4 w-4 animate-spin" />}
+          <button type="submit" disabled={saving || scanning} className="btn-primary w-full text-sm">
+            {saving && <Loader2 className="h-4 w-4 animate-spin" />}
             Save receipt
           </button>
         </form>
