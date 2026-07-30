@@ -31,6 +31,11 @@ export async function updateSession(request: NextRequest) {
 
   const isAuthRoute = request.nextUrl.pathname.startsWith("/login");
   const isCallbackRoute = request.nextUrl.pathname.startsWith("/auth");
+  const isSharedRoute = request.nextUrl.pathname.startsWith("/shared");
+
+  if (isSharedRoute) {
+    return supabaseResponse;
+  }
 
   if (!user && request.nextUrl.pathname.startsWith("/dashboard")) {
     const url = request.nextUrl.clone();

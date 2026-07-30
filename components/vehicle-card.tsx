@@ -1,9 +1,10 @@
 "use client";
 
 import { useState } from "react";
-import { ChevronDown, Gauge, ReceiptText } from "lucide-react";
+import { ChevronDown, Gauge, ReceiptText, Share2 } from "lucide-react";
 import type { VehicleWithReceipts } from "@/lib/types/database";
 import { AddReceiptForm } from "@/components/add-receipt-form";
+import { ShareHistoryModal } from "@/components/share-history-modal";
 
 type VehicleCardProps = {
   vehicle: VehicleWithReceipts;
@@ -27,6 +28,7 @@ function formatCurrency(amount: number) {
 
 export function VehicleCard({ vehicle, userId }: VehicleCardProps) {
   const [expanded, setExpanded] = useState(true);
+  const [shareOpen, setShareOpen] = useState(false);
   const receipts = [...(vehicle.receipts ?? [])].sort(
     (a, b) =>
       new Date(b.service_date).getTime() - new Date(a.service_date).getTime()
@@ -103,6 +105,15 @@ export function VehicleCard({ vehicle, userId }: VehicleCardProps) {
             </ul>
           )}
 
+          <button
+            type="button"
+            onClick={() => setShareOpen(true)}
+            className="mt-4 flex w-full items-center justify-center gap-2 rounded-xl border border-slate-200 bg-white px-4 py-3 text-sm font-semibold text-slate-700 transition-colors hover:bg-slate-50"
+          >
+            <Share2 className="h-4 w-4 text-blue-600" />
+            Share History
+          </button>
+
           <AddReceiptForm
             vehicleId={vehicle.id}
             userId={userId}
@@ -110,6 +121,13 @@ export function VehicleCard({ vehicle, userId }: VehicleCardProps) {
           />
         </div>
       )}
+
+      <ShareHistoryModal
+        vehicleId={vehicle.id}
+        vehicleLabel={vehicle.plate_number}
+        open={shareOpen}
+        onClose={() => setShareOpen(false)}
+      />
     </article>
   );
 }
