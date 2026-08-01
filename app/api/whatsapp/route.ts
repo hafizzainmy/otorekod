@@ -96,7 +96,8 @@ export async function POST(request: Request) {
       odometer: aiResult.odometer || 0,
       workshop_name: aiResult.workshop_name || "Unknown Workshop",
       total_amount: aiResult.total_amount || 0,
-      items_summary: aiResult.items_summary || ""
+      items_summary: "Should be a comma-separated list of parts with their estimated individual costs in brackets if visible, e.g., 'Shell Helix 10W-40 (RM120), Penapis Minyak Hitam (RM25), Spark Plug NGK x4 (RM40)'"
+ 
     });
 
     if (insertErr) {
