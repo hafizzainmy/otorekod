@@ -3,7 +3,7 @@
 import { useEffect, useState } from "react";
 import Link from "next/link";
 import { useRouter } from "next/navigation";
-import { createClient } from "@/lib/supabase/client";
+import { createClient } from "../lib/supabase/client";
 
 export default function Home() {
   const supabase = createClient();
@@ -60,20 +60,32 @@ export default function Home() {
         </svg>
       </div>
 
-      {/* 3. NAVIGATION HEADER */}
-      <header className="relative z-20 w-full px-6 py-5 md:px-12 flex items-center justify-between">
-        <div className="flex items-center gap-3">
+     {/* 3. NAVIGATION HEADER */}
+     <header className="relative z-20 w-full px-6 py-5 md:px-12 flex items-center justify-between">
+        {/* Logo Brand Link */}
+        <Link 
+          href={isLoggedIn ? "/dashboard" : "/login"} 
+          className="flex items-center gap-3 hover:opacity-85 transition"
+        >
           {/* Logo Icon */}
           <svg className="h-8 w-8 text-white fill-current" viewBox="0 0 24 24">
             <path d="M23.5 13.5c0-.828-.672-1.5-1.5-1.5h-1.072l-1.36-3.393c-.34-.848-1.168-1.407-2.08-1.407H6.512c-.912 0-1.74.559-2.08 1.407l-1.36 3.393H2c-.828 0-1.5.672-1.5 1.5V17c0 .828.672 1.5 1.5 1.5h1.5c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h8c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h1.5c.828 0 1.5-.672 1.5-1.5v-3.5zM6.5 17c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zm11 0c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zM5.512 9h12.976l1.2 3H4.312l1.2-3z" />
           </svg>
           <span className="text-2xl font-black tracking-tight text-white">OtoRekod</span>
-        </div>
+        </Link>
 
+        {/* Navigation Links */}
         <nav className="flex items-center gap-6 text-sm font-semibold tracking-wide text-white/90">
           <Link href="/pricing" className="hover:text-white transition">Harga</Link>
           <Link href={isLoggedIn ? "/dashboard" : "/login"} className="hover:text-white transition">Log Masuk</Link>
-          <Link href={isLoggedIn ? "/dashboard" : "/login"} className="bg-white/10 hover:bg-white/20 border border-white/20 px-4 py-1.5 rounded-lg transition">Daftar</Link>
+          
+          {/* Linked Daftar Button */}
+          <Link 
+            href={isLoggedIn ? "/dashboard" : "/login"} 
+            className="bg-white/10 hover:bg-white/20 border border-white/20 px-4 py-1.5 rounded-lg transition"
+          >
+            Daftar
+          </Link>
         </nav>
       </header>
 

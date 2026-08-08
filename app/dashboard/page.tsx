@@ -1,6 +1,7 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, useRef } from "react";
+import { useRouter } from "next/navigation";
 import { createClient } from "@/lib/supabase/client";
 import { 
   ChevronDown, 
@@ -10,8 +11,15 @@ import {
   FileText, 
   TrendingUp, 
   Wrench, 
-  DollarSign, 
-  Calendar 
+  LogOut,
+  Upload,
+  Calendar,
+  X,
+  Plus,
+  Trash2,
+  Sparkles,
+  Camera,
+  FolderOpen
 } from "lucide-react";
 
 interface Vehicle {
@@ -23,6 +31,13 @@ interface Vehicle {
   current_odometer: number;
 }
 
+interface InvoiceLineItem {
+  description: string;
+  quantity: number;
+  unit_price: number;
+  total: number;
+}
+
 interface Receipt {
   id: string;
   service_date: string;
@@ -30,11 +45,18 @@ interface Receipt {
   workshop_name: string;
   total_amount: number;
   items_summary: string;
-  category?: string; // e.g., 'Service', 'Brakes', 'Major', 'Tyres'
+  invoice_no?: string;
+  category?: string;
 }
 
 export default function Dashboard() {
   const supabase = createClient();
+  const router = useRouter();
+  
+  // Refs for different upload methods
+  const fileInputRef = useRef<HTMLInputElement>(null);
+  const cameraInputRef = useRef<HTMLInputElement>(null);
+
   const [loading, setLoading] = useState(true);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [activeVehicle, setActiveVehicle] = useState<Vehicle | null>(null);
@@ -42,13 +64,29 @@ export default function Dashboard() {
   const [expandedReceipts, setExpandedReceipts] = useState<Record<string, boolean>>({});
   const [copied, setCopied] = useState(false);
   const [activeTab, setActiveTab] = useState<"timeline" | "analytics">("timeline");
+  const [showUploadForm, setShowUploadForm] = useState(false);
+  const [scanning, setScanning] = useState(false);
+
+  // Form states for receipt insertion
+  const [newDate, setNewDate] = useState("");
+  const [newOdometer, setNewOdometer] = useState("");
+  const [newWorkshop, setNewWorkshop] = useState("");
+  const [newInvoiceNo, setNewInvoiceNo] = useState("");
+  const [submitting, setSubmitting] = useState(false);
+
+  // Dynamic Line Items State
+  const [lineItems, setLineItems] = useState<InvoiceLineItem[]>([
+    { description: "", quantity: 1, unit_price: 0, total: 0 }
+  ]);
 
   useEffect(() => {
     async function fetchData() {
       const { data: { user } } = await supabase.auth.getUser();
-      if (!user) return;
+      if (!user) {
+        router.push("/login");
+        return;
+      }
 
-      // Get vehicles
       const { data: dbVehicles } = await supabase
         .from("vehicles")
         .select("*")
@@ -59,7 +97,6 @@ export default function Dashboard() {
         setVehicles(dbVehicles);
         setActiveVehicle(dbVehicles[0]);
 
-        // Get receipts
         const { data: dbReceipts } = await supabase
           .from("receipts")
           .select("*")
@@ -67,7 +104,6 @@ export default function Dashboard() {
           .order("service_date", { ascending: false });
 
         if (dbReceipts) {
-          // Dynamic category categorizer based on common keywords
           const categorized = dbReceipts.map((r) => {
             const itemsLower = (r.items_summary || "").toLowerCase();
             let category = "Service";
@@ -86,7 +122,12 @@ export default function Dashboard() {
       setLoading(false);
     }
     fetchData();
-  }, []);
+  }, [router]);
+
+  const handleSignOut = async () => {
+    await supabase.auth.signOut();
+    router.push("/");
+  };
 
   const handleCopyLink = () => {
     if (!activeVehicle) return;
@@ -100,7 +141,142 @@ export default function Dashboard() {
     setExpandedReceipts(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  // Summary Metrics calculation
+  // Convert File to Base64 helper
+  const fileToBase64 = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const reader = new FileReader();
+      reader.readAsDataURL(file);
+      reader.onload = () => {
+        const base64String = (reader.result as string).split(",")[1];
+        resolve(base64String);
+      };
+      reader.onerror = error => reject(error);
+    });
+  };
+
+  // Shared function to handle the AI parsing
+  const handleAIScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    setScanning(true);
+    try {
+      const base64File = await fileToBase64(file);
+      const mimeType = file.type;
+
+      const res = await fetch("/api/scan", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ file: base64File, mimeType })
+      });
+
+      const data = await res.json();
+
+      if (!res.ok) throw new Error(data.error || "Failed to scan file");
+
+      // Auto populate form fields with AI extracted data
+      if (data.invoice_no) setNewInvoiceNo(data.invoice_no);
+      if (data.service_date) setNewDate(data.service_date);
+      if (data.odometer) setNewOdometer(String(data.odometer));
+      if (data.workshop_name) setNewWorkshop(data.workshop_name);
+      
+      if (data.line_items && data.line_items.length > 0) {
+        setLineItems(data.line_items.map((item: any) => ({
+          description: item.description || "",
+          quantity: item.quantity || 1,
+          unit_price: item.unit_price || 0,
+          total: (item.quantity || 1) * (item.unit_price || 0)
+        })));
+      }
+
+      // Open form container
+      setShowUploadForm(true);
+
+    } catch (err) {
+      console.error(err);
+      alert("AI was unable to process the receipt. Please try another photo or enter details manually.");
+    } finally {
+      setScanning(false);
+      // Reset inputs so user can upload same file again if needed
+      if (fileInputRef.current) fileInputRef.current.value = "";
+      if (cameraInputRef.current) cameraInputRef.current.value = "";
+    }
+  };
+
+  const handleLineItemChange = (index: number, field: keyof InvoiceLineItem, value: any) => {
+    const updated = [...lineItems];
+    const item = updated[index];
+
+    if (field === "description") {
+      item.description = value;
+    } else if (field === "quantity") {
+      item.quantity = Math.max(1, parseInt(value, 10) || 1);
+      item.total = item.quantity * item.unit_price;
+    } else if (field === "unit_price") {
+      item.unit_price = Math.max(0, parseFloat(value) || 0);
+      item.total = item.quantity * item.unit_price;
+    }
+
+    setLineItems(updated);
+  };
+
+  const addLineItem = () => {
+    setLineItems([...lineItems, { description: "", quantity: 1, unit_price: 0, total: 0 }]);
+  };
+
+  const removeLineItem = (index: number) => {
+    if (lineItems.length === 1) return;
+    setLineItems(lineItems.filter((_, i) => i !== index));
+  };
+
+  const calculateTotalAmount = () => {
+    return lineItems.reduce((sum, item) => sum + item.total, 0);
+  };
+
+  const handleAddReceipt = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (!activeVehicle || submitting) return;
+
+    setSubmitting(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const totalCalculated = calculateTotalAmount();
+    const serializedItems = JSON.stringify(lineItems);
+
+    const { data: newRecord, error } = await supabase.from("receipts").insert({
+      vehicle_id: activeVehicle.id,
+      user_id: user.id,
+      service_date: newDate,
+      odometer: parseInt(newOdometer, 10) || 0,
+      workshop_name: newWorkshop,
+      invoice_no: newInvoiceNo,
+      total_amount: totalCalculated,
+      items_summary: serializedItems
+    }).select().single();
+
+    if (!error && newRecord) {
+      if (parseInt(newOdometer, 10) > activeVehicle.current_odometer) {
+        await supabase
+          .from("vehicles")
+          .update({ current_odometer: parseInt(newOdometer, 10) })
+          .eq("id", activeVehicle.id);
+        setActiveVehicle({ ...activeVehicle, current_odometer: parseInt(newOdometer, 10) });
+      }
+
+      setReceipts([{ ...newRecord, category: "Service" }, ...receipts]);
+      
+      // Reset State
+      setNewDate("");
+      setNewOdometer("");
+      setNewWorkshop("");
+      setNewInvoiceNo("");
+      setLineItems([{ description: "", quantity: 1, unit_price: 0, total: 0 }]);
+      setShowUploadForm(false);
+    }
+    setSubmitting(false);
+  };
+
   const totalSpent = receipts.reduce((sum, r) => sum + Number(r.total_amount), 0);
   const totalServices = receipts.length;
   const lastServiceDate = receipts[0] 
@@ -108,42 +284,274 @@ export default function Dashboard() {
     : "No records";
   const lastWorkshop = receipts[0]?.workshop_name || "N/A";
 
-  // Helper to parse "Oil Filter (RM25), Spark plug (RM50)" string into clean lines
-  const parseItems = (summaryStr: string) => {
-    if (!summaryStr) return [];
-    return summaryStr.split(",").map(item => item.trim());
+  const getParsedItems = (itemsSummary: string): { isJson: boolean; data: any[] } => {
+    if (!itemsSummary) return { isJson: false, data: [] };
+    try {
+      const parsed = JSON.parse(itemsSummary);
+      if (Array.isArray(parsed)) {
+        return { isJson: true, data: parsed };
+      }
+    } catch (e) {}
+    return { isJson: false, data: itemsSummary.split(",").map(item => item.trim()) };
   };
 
   if (loading) {
     return (
-      <div className="min-h-screen bg-slate-50 flex items-center justify-center">
+      <div className="min-h-screen bg-[#f0f4f8] flex items-center justify-center">
         <div className="animate-spin rounded-full h-10 w-10 border-b-2 border-emerald-600"></div>
       </div>
     );
   }
 
   return (
-    <div className="min-h-screen bg-[#f8fafc] text-slate-800 antialiased">
-      {/* 1. TOP HEADER */}
-      <header className="border-b border-slate-200 bg-white px-4 py-4 md:px-8">
+    <div className="min-h-screen bg-[#f0f4f8] text-slate-800 antialiased">
+      
+      {/* 1. HIDDEN SYSTEM CONTROLS (FILE & NATIVE CAMERA INPUTS) */}
+      {/* Standard File Explorer Uploader (for PDFs, existing gallery images, etc) */}
+      <input 
+        type="file"
+        ref={fileInputRef}
+        onChange={handleAIScan}
+        accept="image/*,application/pdf"
+        className="hidden"
+      />
+
+      {/* Camera-Direct Uploader (Instantly launches rear phone camera on click) */}
+      <input 
+        type="file"
+        ref={cameraInputRef}
+        onChange={handleAIScan}
+        accept="image/*"
+        capture="environment"
+        className="hidden"
+      />
+
+      {/* 2. NAVIGATION HEADER */}
+      <header className="border-b border-slate-200 bg-white px-4 py-4 md:px-8 shadow-sm">
         <div className="mx-auto max-w-5xl flex items-center justify-between">
-          <div className="flex items-center gap-2">
-            <div className="h-8 w-8 rounded-lg bg-emerald-600 flex items-center justify-center text-white font-bold text-lg">O</div>
-            <span className="text-xl font-bold tracking-tight text-slate-900">OtoRekod</span>
+          <div className="flex items-center gap-3">
+            <svg className="h-8 w-8 text-sky-600 fill-current" viewBox="0 0 24 24">
+              <path d="M23.5 13.5c0-.828-.672-1.5-1.5-1.5h-1.072l-1.36-3.393c-.34-.848-1.168-1.407-2.08-1.407H6.512c-.912 0-1.74.559-2.08 1.407l-1.36 3.393H2c-.828 0-1.5.672-1.5 1.5V17c0 .828.672 1.5 1.5 1.5h1.5c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h8c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h1.5c.828 0 1.5-.672 1.5-1.5v-3.5zM6.5 17c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zm11 0c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zM5.512 9h12.976l1.2 3H4.312l1.2-3z" />
+            </svg>
+            <span className="text-xl font-black tracking-tight text-slate-900">OtoRekod</span>
           </div>
-          <div className="flex items-center gap-4">
-            <div className="flex items-center gap-1.5 rounded-full bg-emerald-50 px-3 py-1 text-xs font-semibold text-emerald-700 border border-emerald-200">
-              <span className="h-1.5 w-1.5 rounded-full bg-emerald-500 animate-pulse"></span>
-              Verified Record • Live
-            </div>
+
+          {/* Action buttons (optimized for responsive layouts) */}
+          <div className="flex items-center gap-2">
+            {/* DIRECT MOBILE CAMERA BUTTON */}
+            <button 
+              disabled={scanning}
+              onClick={() => cameraInputRef.current?.click()}
+              className="flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition disabled:opacity-50"
+              title="Take receipt photo"
+            >
+              <Camera size={14} />
+              <span className="hidden sm:inline">Take Photo</span>
+            </button>
+
+            {/* FILE/PDF UPLOADER BUTTON */}
+            <button 
+              disabled={scanning}
+              onClick={() => fileInputRef.current?.click()}
+              className="flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 text-xs font-bold text-indigo-700 transition disabled:opacity-50"
+              title="Upload PDF or Image file"
+            >
+              <FolderOpen size={14} />
+              <span className="hidden sm:inline">Upload File</span>
+            </button>
+
+            {/* MANUAL REKOD BUTTON */}
+            <button 
+              onClick={() => setShowUploadForm(!showUploadForm)}
+              className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition"
+              title="Enter invoice manually"
+            >
+              <Upload size={14} />
+              <span className="hidden sm:inline">Manual</span>
+            </button>
+
+            {/* LOG OUT BUTTON */}
+            <button 
+              onClick={handleSignOut}
+              className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-2.5 py-2 text-xs font-bold text-slate-600 shadow-sm transition"
+              title="Sign out of OtoRekod"
+            >
+              <LogOut size={14} />
+            </button>
           </div>
         </div>
       </header>
 
+      {/* AI Processing Loading Overlay */}
+      {scanning && (
+        <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-slate-900/60 backdrop-blur-sm text-white p-4">
+          <div className="bg-slate-900 rounded-2xl p-6 border border-indigo-500/30 flex flex-col items-center shadow-2xl max-w-sm text-center">
+            <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-indigo-400 mb-4"></div>
+            <h3 className="font-extrabold text-base text-indigo-300 flex items-center gap-2">
+              <Sparkles size={16} className="animate-pulse" />
+              OtoRekod AI Parsing...
+            </h3>
+            <p className="text-xs text-slate-400 mt-2">Reading invoice details and structuring individual line items. This takes about 5 seconds.</p>
+          </div>
+        </div>
+      )}
+
       <main className="mx-auto max-w-5xl px-4 py-8 md:px-8">
+        
+        {/* 3. DYNAMIC REVIEW & EDIT FORM */}
+        {showUploadForm && activeVehicle && (
+          <div className="mb-8 rounded-2xl border-2 border-indigo-200 bg-white p-6 shadow-lg animate-in slide-in-from-top duration-300">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-5">
+              <h3 className="font-bold text-slate-800 flex items-center gap-1.5 text-base">
+                <Sparkles className="text-indigo-600" size={18} />
+                Verify & Save Invoice Details
+              </h3>
+              <button onClick={() => setShowUploadForm(false)} className="text-slate-400 hover:text-slate-600 transition">
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddReceipt} className="space-y-6">
+              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Invoice / Receipt No</label>
+                  <input 
+                    type="text" 
+                    placeholder="e.g. INV-9921"
+                    value={newInvoiceNo} 
+                    onChange={e => setNewInvoiceNo(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Service Date</label>
+                  <input 
+                    type="date" 
+                    required 
+                    value={newDate} 
+                    onChange={e => setNewDate(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Odometer (KM)</label>
+                  <input 
+                    type="number" 
+                    required 
+                    placeholder="Current Mileage"
+                    value={newOdometer} 
+                    onChange={e => setNewOdometer(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Workshop Name</label>
+                  <input 
+                    type="text" 
+                    required 
+                    placeholder="e.g. Bengkel Wira Jaya"
+                    value={newWorkshop} 
+                    onChange={e => setNewWorkshop(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                  />
+                </div>
+              </div>
+
+              {/* Dynamic Line Items Section */}
+              <div className="border-t border-slate-100 pt-4">
+                <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Invoice Line Items</h4>
+                
+                <div className="space-y-3">
+                  {lineItems.map((item, index) => (
+                    <div key={index} className="flex flex-col md:flex-row items-center gap-3">
+                      <div className="flex-grow w-full">
+                        <input 
+                          type="text" 
+                          required
+                          placeholder="Item description"
+                          value={item.description}
+                          onChange={e => handleLineItemChange(index, "description", e.target.value)}
+                          className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                      <div className="w-full md:w-24">
+                        <input 
+                          type="number" 
+                          required
+                          placeholder="Qty"
+                          value={item.quantity}
+                          onChange={e => handleLineItemChange(index, "quantity", e.target.value)}
+                          className="w-full rounded-lg border border-slate-200 p-2.5 text-sm text-center focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                      <div className="w-full md:w-32">
+                        <input 
+                          type="number" 
+                          step="0.01"
+                          required
+                          placeholder="Unit Price (RM)"
+                          value={item.unit_price || ""}
+                          onChange={e => handleLineItemChange(index, "unit_price", e.target.value)}
+                          className="w-full rounded-lg border border-slate-200 p-2.5 text-sm text-right focus:border-indigo-500 focus:outline-none"
+                        />
+                      </div>
+                      <div className="w-full md:w-32 text-right font-bold text-slate-700 px-2 text-sm">
+                        RM {item.total.toFixed(2)}
+                      </div>
+                      {lineItems.length > 1 && (
+                        <button 
+                          type="button" 
+                          onClick={() => removeLineItem(index)}
+                          className="text-slate-400 hover:text-red-500 p-2 transition"
+                        >
+                          <Trash2 size={16} />
+                        </button>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                <button 
+                  type="button" 
+                  onClick={addLineItem}
+                  className="mt-4 flex items-center gap-1 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition"
+                >
+                  <Plus size={14} />
+                  Add Line Item
+                </button>
+              </div>
+
+              {/* Form Footer & Calculations */}
+              <div className="border-t border-slate-100 pt-5 flex flex-col md:flex-row items-center justify-between gap-4 bg-slate-50/50 p-4 rounded-xl">
+                <div className="text-sm">
+                  <span className="text-slate-400 font-semibold uppercase tracking-wider text-xs">Calculated Total: </span>
+                  <span className="font-extrabold text-slate-800 text-lg ml-1">RM {calculateTotalAmount().toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                </div>
+
+                <div className="flex gap-3 w-full md:w-auto">
+                  <button 
+                    type="button" 
+                    onClick={() => setShowUploadForm(false)}
+                    className="w-full md:w-auto rounded-lg border border-slate-200 px-5 py-2.5 text-sm font-semibold text-slate-500 hover:bg-slate-50 transition"
+                  >
+                    Cancel
+                  </button>
+                  <button 
+                    type="submit" 
+                    disabled={submitting}
+                    className="w-full md:w-auto rounded-lg bg-emerald-600 hover:bg-emerald-700 px-6 py-2.5 text-sm font-bold text-white transition disabled:opacity-50 shadow-sm"
+                  >
+                    {submitting ? "Saving..." : "Save Invoice"}
+                  </button>
+                </div>
+              </div>
+            </form>
+          </div>
+        )}
+
         {activeVehicle ? (
           <div>
-            {/* 2. TITLE & SHARE CARD */}
+            {/* 4. TITLE & SHARE CARD */}
             <div className="mb-8 flex flex-col md:flex-row md:items-end md:justify-between gap-6">
               <div>
                 <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Vehicle Passport • Read-Only</span>
@@ -151,7 +559,6 @@ export default function Dashboard() {
                   {activeVehicle.make} {activeVehicle.model} {activeVehicle.year ? `'${String(activeVehicle.year).slice(-2)}` : ""}
                 </h1>
                 
-                {/* Malaysian Plate Styling */}
                 <div className="mt-3 flex items-center gap-3">
                   <div className="bg-[#1e293b] text-white font-mono px-3 py-1 rounded border-2 border-slate-600 font-bold tracking-wider shadow-sm text-sm">
                     {activeVehicle.plate_number.toUpperCase()}
@@ -162,7 +569,6 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* Share Box */}
               <div className="rounded-xl border border-slate-200 bg-white p-4 shadow-sm max-w-sm">
                 <span className="text-xs font-semibold text-slate-400 block mb-2">Share this passport</span>
                 <div className="flex items-center gap-2">
@@ -180,9 +586,8 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 3. FOUR METRIC CARDS */}
+            {/* 5. FOUR STAT SUMMARY CARDS */}
             <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-4">
-              {/* Odometer */}
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Current Odometer</span>
                 <div className="mt-2 text-2xl font-black text-slate-950">
@@ -191,14 +596,12 @@ export default function Dashboard() {
                 <span className="text-[10px] text-slate-400 mt-1 block">Updated via last upload</span>
               </div>
 
-              {/* Total Services */}
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Services</span>
                 <div className="mt-2 text-2xl font-black text-slate-950">{totalServices}</div>
                 <span className="text-[10px] text-slate-400 mt-1 block">logged records</span>
               </div>
 
-              {/* Total Spent */}
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Total Spent</span>
                 <div className="mt-2 text-2xl font-black text-emerald-600">
@@ -207,7 +610,6 @@ export default function Dashboard() {
                 <span className="text-[10px] text-slate-400 mt-1 block">across all workshops</span>
               </div>
 
-              {/* Last Service */}
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Last Service</span>
                 <div className="mt-2 text-lg font-bold text-slate-950 truncate">{lastServiceDate}</div>
@@ -215,7 +617,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 4. NAVIGATION TABS */}
+            {/* 6. NAVIGATION TABS */}
             <div className="mb-6 border-b border-slate-200">
               <nav className="flex gap-6">
                 <button 
@@ -237,12 +639,11 @@ export default function Dashboard() {
               </nav>
             </div>
 
-            {/* 5. TIMELINE BODY */}
+            {/* 7. TIMELINE BODY */}
             {activeTab === "timeline" ? (
               <div className="space-y-4">
                 <div className="flex items-center justify-between text-xs text-slate-400 font-semibold mb-2">
                   <span>{receipts.length} records • most recent first</span>
-                  {/* Category Legend */}
                   <div className="hidden md:flex items-center gap-3">
                     <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500"></span>Service</span>
                     <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-500"></span>Brakes</span>
@@ -253,9 +654,8 @@ export default function Dashboard() {
 
                 {receipts.map((receipt) => {
                   const isExpanded = !!expandedReceipts[receipt.id];
-                  const parsedItems = parseItems(receipt.items_summary);
+                  const parsed = getParsedItems(receipt.items_summary);
 
-                  // Set badge colors based on category
                   let categoryColor = "bg-emerald-50 text-emerald-700 border-emerald-200";
                   let dotColor = "bg-emerald-500";
                   if (receipt.category === "Brakes") {
@@ -279,23 +679,20 @@ export default function Dashboard() {
                       key={receipt.id} 
                       className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
                     >
-                      {/* Timeline Card Header (Clickable) */}
+                      {/* Main Timeline Bar Accordion Trigger */}
                       <div 
                         onClick={() => toggleExpand(receipt.id)}
                         className="flex cursor-pointer items-center justify-between p-5 select-none"
                       >
                         <div className="flex items-center gap-4">
-                          {/* Left Date Indicator */}
                           <div className="flex flex-col items-center justify-center border-r border-slate-100 pr-4 text-center min-w-[50px]">
                             <span className="text-xl font-black text-slate-800 leading-none">{day}</span>
                             <span className="text-[10px] font-bold text-slate-400 mt-1">{month}</span>
                             <span className="text-[9px] text-slate-300 font-semibold">{year}</span>
                           </div>
 
-                          {/* Middle Details */}
                           <div>
                             <div className="flex flex-wrap items-center gap-2">
-                              {/* Category Badge */}
                               <span className={`rounded-md border px-2 py-0.5 text-[10px] font-bold uppercase tracking-wider ${categoryColor} flex items-center gap-1`}>
                                 <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`}></span>
                                 {receipt.category}
@@ -303,20 +700,21 @@ export default function Dashboard() {
                               <span className="text-xs font-semibold text-slate-400">
                                 {receipt.odometer.toLocaleString()} km
                               </span>
+                              {receipt.invoice_no && (
+                                <span className="text-[10px] font-semibold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+                                  #{receipt.invoice_no}
+                                </span>
+                              )}
                             </div>
                             <h4 className="mt-1 font-bold text-slate-800 text-sm md:text-base leading-snug group-hover:text-emerald-700 transition">
                               {receipt.workshop_name}
                             </h4>
-                            <span className="text-xs text-slate-400 block mt-0.5">
-                              {parsedItems.length} items parsed
-                            </span>
                           </div>
                         </div>
 
-                        {/* Right Price & Accordion Controls */}
                         <div className="flex items-center gap-4">
                           <span className="text-lg font-extrabold text-slate-900">
-                            RM {Number(receipt.total_amount).toLocaleString(undefined, { minimumFractionDigits: 0, maximumFractionDigits: 0 })}
+                            RM {Number(receipt.total_amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
                           <div className="text-slate-400">
                             {isExpanded ? <ChevronUp size={18} /> : <ChevronDown size={18} />}
@@ -324,38 +722,58 @@ export default function Dashboard() {
                         </div>
                       </div>
 
-                      {/* Timeline Card Expanded Body */}
+                      {/* Expanded Section showing the itemized invoice table */}
                       {isExpanded && (
                         <div className="border-t border-slate-100 bg-[#fafcfd] p-5">
-                          <div className="max-w-2xl pl-12">
-                            <h5 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-3">Itemized Parts & Labor Breakdown</h5>
-                            <ul className="space-y-2.5">
-                              {parsedItems.map((item, index) => {
-                                // Match and parse items formatting: e.g. Spark Plug NGK (RM50)
-                                const priceMatch = item.match(/\((RM\s*?\d+(\.\d{2})?)\)/i);
-                                const itemNameOnly = priceMatch ? item.replace(priceMatch[0], "").trim() : item;
-                                const itemPriceOnly = priceMatch ? priceMatch[1] : null;
-
-                                return (
-                                  <li key={index} className="flex items-center justify-between text-xs font-medium text-slate-600 border-b border-dashed border-slate-100 pb-2">
-                                    <div className="flex items-center gap-2">
-                                      <span className="h-1.5 w-1.5 rounded-full bg-slate-300"></span>
-                                      <span>{itemNameOnly}</span>
-                                    </div>
-                                    {itemPriceOnly && (
-                                      <span className="font-bold text-slate-800">{itemPriceOnly}</span>
-                                    )}
+                          <div className="max-w-3xl md:pl-12">
+                            <h5 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-3">Itemized Invoice Summary</h5>
+                            
+                            {parsed.isJson ? (
+                              /* 1. Structured Invoice View */
+                              <div className="overflow-x-auto rounded-lg border border-slate-100 bg-white">
+                                <table className="w-full text-left text-xs">
+                                  <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100">
+                                    <tr>
+                                      <th className="px-4 py-2.5">Item Description</th>
+                                      <th className="px-4 py-2.5 text-center w-16">Qty</th>
+                                      <th className="px-4 py-2.5 text-right w-32">Unit (RM)</th>
+                                      <th className="px-4 py-2.5 text-right w-32">Total (RM)</th>
+                                    </tr>
+                                  </thead>
+                                  <tbody className="divide-y divide-slate-100 font-medium text-slate-600">
+                                    {parsed.data.map((item: InvoiceLineItem, idx: number) => (
+                                      <tr key={idx} className="hover:bg-slate-50/50">
+                                        <td className="px-4 py-2.5 font-semibold text-slate-700">{item.description}</td>
+                                        <td className="px-4 py-2.5 text-center">{item.quantity}</td>
+                                        <td className="px-4 py-2.5 text-right">{Number(item.unit_price).toFixed(2)}</td>
+                                        <td className="px-4 py-2.5 text-right font-bold text-slate-700">{Number(item.total).toFixed(2)}</td>
+                                      </tr>
+                                    ))}
+                                    {/* Subtotal row */}
+                                    <tr className="bg-slate-50/50 font-bold">
+                                      <td colSpan={3} className="px-4 py-3 text-right text-slate-500 uppercase tracking-wider text-[10px]">Total Amount</td>
+                                      <td className="px-4 py-3 text-right text-slate-900 text-sm">RM {Number(receipt.total_amount).toFixed(2)}</td>
+                                    </tr>
+                                  </tbody>
+                                </table>
+                              </div>
+                            ) : (
+                              /* 2. Legacy fallback list view */
+                              <ul className="space-y-2.5 bg-white p-4 rounded-lg border border-slate-100">
+                                {parsed.data.map((item: string, index: number) => (
+                                  <li key={index} className="flex items-center gap-2 text-xs font-medium text-slate-600 border-b border-dashed border-slate-100 pb-2">
+                                    <span className="h-1.5 w-1.5 rounded-full bg-slate-300"></span>
+                                    <span>{item}</span>
                                   </li>
-                                );
-                              })}
-                            </ul>
+                                ))}
+                              </ul>
+                            )}
 
-                            {/* Utility Buttons */}
-                            <div className="mt-6 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
+                            <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
                               <span>Receipt #RCP-{receipt.id.slice(0,8).toUpperCase()}</span>
-                              <button className="flex items-center gap-1 rounded bg-white border border-slate-200 px-2.5 py-1 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 shadow-sm transition">
+                              <button className="flex items-center gap-1 rounded bg-white border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 shadow-sm transition">
                                 <FileText size={12} />
-                                View Receipt
+                                View Original Invoice
                               </button>
                             </div>
                           </div>
@@ -366,7 +784,6 @@ export default function Dashboard() {
                 })}
               </div>
             ) : (
-              /* ANALYTICS TAB CONTENT */
               <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-slate-500 shadow-sm">
                 <TrendingUp size={36} className="mx-auto text-slate-300 mb-3" />
                 <h4 className="font-bold text-slate-800 mb-1">Maintenance Expense Analytics</h4>
@@ -375,7 +792,6 @@ export default function Dashboard() {
             )}
           </div>
         ) : (
-          /* NO VEHICLE STATE */
           <div className="rounded-xl border-2 border-dashed border-slate-200 bg-white p-12 text-center text-slate-500 shadow-sm">
             <Wrench size={36} className="mx-auto text-slate-300 mb-3" />
             <h4 className="font-bold text-slate-800 mb-1">No Vehicles Registered</h4>
