@@ -1,14 +1,15 @@
 import { NextResponse } from "next/server";
+import OpenAI from "openai";
 
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
 export async function POST(request: Request) {
   try {
-    const apiKey = process.env.GEMINI_API_KEY;
+    const apiKey = process.env.OPENAI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
-        { error: "GEMINI_API_KEY is not configured in environment variables." },
+        { error: "OPENAI_API_KEY is not configured in environment variables." },
         { status: 500 }
       );
     }
@@ -17,24 +18,26 @@ export async function POST(request: Request) {
     let { file, mimeType } = payload;
 
     if (!file) {
-      return NextResponse.json({ error: "Missing file parameter" }, { status: 400 });
+      return NextResponse.json({ error: "Missing file payload" }, { status: 400 });
     }
 
-    // Strip data URL header if present
+    // Strip data URI header if present
     if (file.includes(",")) {
       file = file.split(",")[1];
     }
 
-    // Auto-detect PDF vs Image
-    if (!mimeType || mimeType === "application/x-pdf" || mimeType === "binary/octet-stream") {
-      mimeType = file.startsWith("JVBERi") ? "application/pdf" : "image/jpeg";
-    }
+    const openai = new OpenAI({ apiKey });
 
-    const promptText = `
+    // Standardize mimeType
+    const resolvedMime = mimeType && mimeType.startsWith("image/") ? mimeType : "image/jpeg";
+
+    const prompt = `
       You are an expert Malaysian automotive workshop invoice parser.
-      Analyze the attached vehicle repair receipt/invoice (image or PDF) and extract the metadata and individual line items.
+      Analyze the attached vehicle repair receipt/invoice and extract the metadata and individual line items.
 
-      Return ONLY a strict JSON object with this exact schema (no markdown, no backticks):
+      Translate common Malay terms to English (e.g. "Minyak Hitam" -> "Engine Oil", "Upah" -> "Labor").
+
+      Return ONLY a JSON object with this exact schema:
       {
         "invoice_no": "string or empty string",
         "service_date": "YYYY-MM-DD or empty string",
@@ -51,63 +54,42 @@ export async function POST(request: Request) {
       }
     `;
 
-    // HERE IS THE GOOGLE STABLE V1 ENDPOINT:
-    const response = await fetch(
-      `https://generativelanguage.googleapis.com/v1/models/gemini-1.5-flash:generateContent?key=${apiKey}`,
-      {
-        method: "POST",
-        headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({
-          contents: [
+    const response = await openai.chat.completions.create({
+      model: "gpt-4o-mini",
+      response_format: { type: "json_object" },
+      temperature: 0.1,
+      messages: [
+        {
+          role: "user",
+          content: [
+            { type: "text", text: prompt },
             {
-              parts: [
-                { text: promptText },
-                {
-                  inline_data: {
-                    mime_type: mimeType,
-                    data: file,
-                  },
-                },
-              ],
+              type: "image_url",
+              image_url: {
+                url: `data:${resolvedMime};base64,${file}`,
+                detail: "high",
+              },
             },
           ],
-          generationConfig: {
-            response_mime_type: "application/json",
-          },
-        }),
-      }
-    );
+        },
+      ],
+    });
 
-    const data = await response.json();
-
-    if (!response.ok) {
+    const content = response.choices[0]?.message?.content;
+    if (!content) {
       return NextResponse.json(
-        { error: data.error?.message || response.statusText },
+        { error: "AI returned an empty response. Please try another clear photo." },
         { status: 500 }
       );
     }
 
-    const candidateText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-    if (!candidateText) {
-      return NextResponse.json(
-        { error: "AI returned empty response. Please try another image/PDF." },
-        { status: 500 }
-      );
-    }
-
-    const cleanJson = candidateText
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```$/i, "")
-      .trim();
-
-    const parsedData = JSON.parse(cleanJson);
+    const parsedData = JSON.parse(content);
     return NextResponse.json(parsedData);
 
   } catch (error: any) {
-    console.error("AI Invoice Scan Error:", error);
+    console.error("OpenAI Scan API Error:", error);
     return NextResponse.json(
-      { error: error?.message || "Failed to process document with AI" },
+      { error: error?.message || "Failed to process receipt with OpenAI" },
       { status: 500 }
     );
   }
