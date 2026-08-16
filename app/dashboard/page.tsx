@@ -141,7 +141,47 @@ export default function Dashboard() {
     setExpandedReceipts(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  // Convert File to Base64 helper
+  // Helper to compress large smartphone photos directly in the browser
+  const compressImage = (file: File): Promise<string> => {
+    return new Promise((resolve, reject) => {
+      const img = new Image();
+      img.src = URL.createObjectURL(file);
+      img.onload = () => {
+        const canvas = document.createElement("canvas");
+        const ctx = canvas.getContext("2d");
+        
+        // Target high-definition resolution optimized for OCR
+        const MAX_WIDTH = 1200;
+        const MAX_HEIGHT = 1200;
+        let width = img.width;
+        let height = img.height;
+
+        if (width > height) {
+          if (width > MAX_WIDTH) {
+            height *= MAX_WIDTH / width;
+            width = MAX_WIDTH;
+          }
+        } else {
+          if (height > MAX_HEIGHT) {
+            width *= MAX_HEIGHT / height;
+            height = MAX_HEIGHT;
+          }
+        }
+
+        canvas.width = width;
+        canvas.height = height;
+        ctx?.drawImage(img, 0, 0, width, height);
+
+        // Export as JPEG at 75% quality (shrinks 8MB down to ~200KB)
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
+        const base64String = dataUrl.split(",")[1];
+        resolve(base64String);
+      };
+      img.onerror = error => reject(error);
+    });
+  };
+
+  // Convert File to Base64 (Standard fallback for PDF files)
   const fileToBase64 = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const reader = new FileReader();
@@ -154,15 +194,22 @@ export default function Dashboard() {
     });
   };
 
-  // Shared function to handle the AI parsing
+  // Upgraded AI Invoice Scanner Execution
   const handleAIScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
     setScanning(true);
     try {
-      const base64File = await fileToBase64(file);
+      let base64File = "";
       const mimeType = file.type;
+
+      // Compress if it is an image, upload directly if it is a PDF
+      if (mimeType.startsWith("image/")) {
+        base64File = await compressImage(file);
+      } else {
+        base64File = await fileToBase64(file);
+      }
 
       const res = await fetch("/api/scan", {
         method: "POST",
@@ -174,7 +221,7 @@ export default function Dashboard() {
 
       if (!res.ok) throw new Error(data.error || "Failed to scan file");
 
-      // Auto populate form fields with AI extracted data
+      // Auto-populate form fields
       if (data.invoice_no) setNewInvoiceNo(data.invoice_no);
       if (data.service_date) setNewDate(data.service_date);
       if (data.odometer) setNewOdometer(String(data.odometer));
@@ -189,15 +236,13 @@ export default function Dashboard() {
         })));
       }
 
-      // Open form container
       setShowUploadForm(true);
 
-    } catch (err) {
-      console.error(err);
-      alert("AI was unable to process the receipt. Please try another photo or enter details manually.");
+    } catch (err: any) {
+      console.error("AI Error Debug details:", err);
+      alert(`AI was unable to process the receipt: ${err.message || "Unknown error"}. Please try another photo or enter details manually.`);
     } finally {
       setScanning(false);
-      // Reset inputs so user can upload same file again if needed
       if (fileInputRef.current) fileInputRef.current.value = "";
       if (cameraInputRef.current) cameraInputRef.current.value = "";
     }
@@ -307,7 +352,6 @@ export default function Dashboard() {
     <div className="min-h-screen bg-[#f0f4f8] text-slate-800 antialiased">
       
       {/* 1. HIDDEN SYSTEM CONTROLS (FILE & NATIVE CAMERA INPUTS) */}
-      {/* Standard File Explorer Uploader (for PDFs, existing gallery images, etc) */}
       <input 
         type="file"
         ref={fileInputRef}
@@ -316,7 +360,6 @@ export default function Dashboard() {
         className="hidden"
       />
 
-      {/* Camera-Direct Uploader (Instantly launches rear phone camera on click) */}
       <input 
         type="file"
         ref={cameraInputRef}
@@ -336,9 +379,8 @@ export default function Dashboard() {
             <span className="text-xl font-black tracking-tight text-slate-900">OtoRekod</span>
           </div>
 
-          {/* Action buttons (optimized for responsive layouts) */}
+          {/* Action buttons */}
           <div className="flex items-center gap-2">
-            {/* DIRECT MOBILE CAMERA BUTTON */}
             <button 
               disabled={scanning}
               onClick={() => cameraInputRef.current?.click()}
@@ -349,7 +391,6 @@ export default function Dashboard() {
               <span className="hidden sm:inline">Take Photo</span>
             </button>
 
-            {/* FILE/PDF UPLOADER BUTTON */}
             <button 
               disabled={scanning}
               onClick={() => fileInputRef.current?.click()}
@@ -360,7 +401,6 @@ export default function Dashboard() {
               <span className="hidden sm:inline">Upload File</span>
             </button>
 
-            {/* MANUAL REKOD BUTTON */}
             <button 
               onClick={() => setShowUploadForm(!showUploadForm)}
               className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition"
@@ -370,7 +410,6 @@ export default function Dashboard() {
               <span className="hidden sm:inline">Manual</span>
             </button>
 
-            {/* LOG OUT BUTTON */}
             <button 
               onClick={handleSignOut}
               className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-2.5 py-2 text-xs font-bold text-slate-600 shadow-sm transition"
@@ -729,7 +768,7 @@ export default function Dashboard() {
                             <h5 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-3">Itemized Invoice Summary</h5>
                             
                             {parsed.isJson ? (
-                              /* 1. Structured Invoice View */
+                              /* Structured Invoice View */
                               <div className="overflow-x-auto rounded-lg border border-slate-100 bg-white">
                                 <table className="w-full text-left text-xs">
                                   <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100">
@@ -758,7 +797,7 @@ export default function Dashboard() {
                                 </table>
                               </div>
                             ) : (
-                              /* 2. Legacy fallback list view */
+                              /* Legacy fallback list view */
                               <ul className="space-y-2.5 bg-white p-4 rounded-lg border border-slate-100">
                                 {parsed.data.map((item: string, index: number) => (
                                   <li key={index} className="flex items-center gap-2 text-xs font-medium text-slate-600 border-b border-dashed border-slate-100 pb-2">
