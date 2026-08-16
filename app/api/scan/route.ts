@@ -1,7 +1,5 @@
 import { NextResponse } from "next/server";
-import { GoogleGenerativeAI } from "@google/generative-ai";
 
-// Allow up to 60s for PDF OCR processing on Vercel
 export const maxDuration = 60;
 export const dynamic = "force-dynamic";
 
@@ -10,7 +8,7 @@ export async function POST(request: Request) {
     const apiKey = process.env.GEMINI_API_KEY;
     if (!apiKey) {
       return NextResponse.json(
-        { error: "GEMINI_API_KEY is not configured in Vercel environment variables." },
+        { error: "GEMINI_API_KEY is not configured in environment variables." },
         { status: 500 }
       );
     }
@@ -22,39 +20,29 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing file parameter" }, { status: 400 });
     }
 
-    // 1. Strip any "data:...;base64," prefix if present
+    // Strip data URI prefix if present
     if (file.includes(",")) {
       file = file.split(",")[1];
     }
 
-    // 2. Normalize and ensure correct mimeType for PDFs and images
+    // Auto-detect PDF vs Image MIME types
     if (!mimeType || mimeType === "application/x-pdf" || mimeType === "binary/octet-stream") {
       mimeType = file.startsWith("JVBERi") ? "application/pdf" : "image/jpeg";
     }
 
-    const genAI = new GoogleGenerativeAI(apiKey);
-
-    // Enforce strict JSON output from Gemini
-    const model = genAI.getGenerativeModel({
-      model: "gemini-2.0-flash", // or "gemini-2.0-flash"
-      generationConfig: {
-        responseMimeType: "application/json",
-      },
-    });
-
-    const prompt = `
+    const promptText = `
       You are an expert Malaysian automotive workshop invoice parser.
       Analyze the attached vehicle repair receipt/invoice (image or PDF) and extract the metadata and individual line items.
 
-      Extract and return ONLY a valid JSON object matching this schema:
+      Return ONLY a strict JSON object with this exact schema (no markdown, no backticks):
       {
-        "invoice_no": "string or empty string if not found",
-        "service_date": "YYYY-MM-DD format (use current year if year is ambiguous, or empty string)",
+        "invoice_no": "string or empty string",
+        "service_date": "YYYY-MM-DD or empty string",
         "odometer": 0,
-        "workshop_name": "string (name of mechanic or workshop)",
+        "workshop_name": "string",
         "line_items": [
           {
-            "description": "string (translate common Malay part names, e.g. Minyak Hitam -> Engine Oil)",
+            "description": "string",
             "quantity": 1,
             "unit_price": 0.0,
             "total": 0.0
@@ -63,28 +51,83 @@ export async function POST(request: Request) {
       }
     `;
 
-    const result = await model.generateContent([
-      prompt,
-      {
-        inlineData: {
-          data: file,
-          mimeType: mimeType,
-        },
-      },
-    ]);
+    // Candidate models to try in order
+    const modelsToTry = [
+      "gemini-1.5-flash",
+      "gemini-1.5-flash-latest",
+      "gemini-2.0-flash-exp",
+      "gemini-1.5-pro"
+    ];
 
-    const responseText = result.response.text().trim();
+    let lastErrorDetails = "";
+    let parsedData = null;
 
-    // Clean JSON wrappers in case model includes them
-    const cleanJson = responseText
-      .replace(/^```json\s*/i, "")
-      .replace(/^```\s*/i, "")
-      .replace(/```$/i, "")
-      .trim();
+    for (const model of modelsToTry) {
+      try {
+        const response = await fetch(
+          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
+          {
+            method: "POST",
+            headers: {
+              "Content-Type": "application/json",
+            },
+            body: JSON.stringify({
+              contents: [
+                {
+                  parts: [
+                    { text: promptText },
+                    {
+                      inline_data: {
+                        mime_type: mimeType,
+                        data: file,
+                      },
+                    },
+                  ],
+                },
+              ],
+              generationConfig: {
+                response_mime_type: "application/json",
+              },
+            }),
+          }
+        );
 
-    const parsedData = JSON.parse(cleanJson);
+        const data = await response.json();
+
+        if (!response.ok) {
+          lastErrorDetails = data.error?.message || response.statusText;
+          continue; // Try next model
+        }
+
+        const candidateText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+        if (!candidateText) {
+          lastErrorDetails = "Empty response from AI";
+          continue;
+        }
+
+        const cleanJson = candidateText
+          .replace(/^```json\s*/i, "")
+          .replace(/^```\s*/i, "")
+          .replace(/```$/i, "")
+          .trim();
+
+        parsedData = JSON.parse(cleanJson);
+        if (parsedData) break; // Successfully parsed!
+
+      } catch (err: any) {
+        lastErrorDetails = err.message;
+      }
+    }
+
+    if (!parsedData) {
+      return NextResponse.json(
+        { error: `Google API Error: ${lastErrorDetails}` },
+        { status: 500 }
+      );
+    }
 
     return NextResponse.json(parsedData);
+
   } catch (error: any) {
     console.error("AI Invoice Scan Error:", error);
     return NextResponse.json(
