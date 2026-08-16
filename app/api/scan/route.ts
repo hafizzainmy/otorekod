@@ -36,7 +36,7 @@ export async function POST(request: Request) {
 
     // Enforce strict JSON output from Gemini
     const model = genAI.getGenerativeModel({
-      model: "gemini-1.5-flash-latest", // or "gemini-2.0-flash"
+      model: "gemini-2.0-flash", // or "gemini-2.0-flash"
       generationConfig: {
         responseMimeType: "application/json",
       },
