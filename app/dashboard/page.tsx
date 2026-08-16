@@ -141,7 +141,7 @@ export default function Dashboard() {
     setExpandedReceipts(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  // Helper to compress large smartphone photos directly in the browser
+  // 1. Helper to compress standard camera/gallery photos
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -149,8 +149,6 @@ export default function Dashboard() {
       img.onload = () => {
         const canvas = document.createElement("canvas");
         const ctx = canvas.getContext("2d");
-        
-        // Target high-definition resolution optimized for OCR
         const MAX_WIDTH = 1200;
         const MAX_HEIGHT = 1200;
         let width = img.width;
@@ -172,29 +170,53 @@ export default function Dashboard() {
         canvas.height = height;
         ctx?.drawImage(img, 0, 0, width, height);
 
-        // Export as JPEG at 75% quality (shrinks 8MB down to ~200KB)
         const dataUrl = canvas.toDataURL("image/jpeg", 0.75);
-        const base64String = dataUrl.split(",")[1];
-        resolve(base64String);
+        resolve(dataUrl.split(",")[1]);
       };
       img.onerror = error => reject(error);
     });
   };
 
-  // Convert File to Base64 (Standard fallback for PDF files)
-  const fileToBase64 = (file: File): Promise<string> => {
-    return new Promise((resolve, reject) => {
-      const reader = new FileReader();
-      reader.readAsDataURL(file);
-      reader.onload = () => {
-        const base64String = (reader.result as string).split(",")[1];
-        resolve(base64String);
-      };
-      reader.onerror = error => reject(error);
+  // 2. Helper to convert any uploaded PDF into a clean image for OpenAI
+  const convertPdfToImage = async (file: File): Promise<string> => {
+    return new Promise(async (resolve, reject) => {
+      try {
+        // Load pdf.js dynamically if not already loaded
+        if (!(window as any).pdfjsLib) {
+          await new Promise((res, rej) => {
+            const script = document.createElement("script");
+            script.src = "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.min.js";
+            script.onload = () => {
+              (window as any).pdfjsLib.GlobalWorkerOptions.workerSrc =
+                "https://cdnjs.cloudflare.com/ajax/libs/pdf.js/3.11.174/pdf.worker.min.js";
+              res(true);
+            };
+            script.onerror = rej;
+            document.body.appendChild(script);
+          });
+        }
+
+        const arrayBuffer = await file.arrayBuffer();
+        const pdf = await (window as any).pdfjsLib.getDocument({ data: arrayBuffer }).promise;
+        const page = await pdf.getPage(1);
+
+        const viewport = page.getViewport({ scale: 2.0 }); // High resolution for OCR
+        const canvas = document.createElement("canvas");
+        const context = canvas.getContext("2d");
+        canvas.height = viewport.height;
+        canvas.width = viewport.width;
+
+        await page.render({ canvasContext: context, viewport }).promise;
+
+        const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
+        resolve(dataUrl.split(",")[1]);
+      } catch (err) {
+        reject(err);
+      }
     });
   };
 
-  // Upgraded AI Invoice Scanner Execution
+  // 3. Main Scanner Execution (Handles both Images & PDFs seamlessly)
   const handleAIScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -202,26 +224,23 @@ export default function Dashboard() {
     setScanning(true);
     try {
       let base64File = "";
-      const mimeType = file.type;
 
-      // Compress if it is an image, upload directly if it is a PDF
-      if (mimeType.startsWith("image/")) {
-        base64File = await compressImage(file);
+      if (file.type === "application/pdf" || file.name.toLowerCase().endsWith(".pdf")) {
+        base64File = await convertPdfToImage(file);
       } else {
-        base64File = await fileToBase64(file);
+        base64File = await compressImage(file);
       }
 
       const res = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
-        body: JSON.stringify({ file: base64File, mimeType })
+        body: JSON.stringify({ file: base64File, mimeType: "image/jpeg" })
       });
 
       const data = await res.json();
 
       if (!res.ok) throw new Error(data.error || "Failed to scan file");
 
-      // Auto-populate form fields
       if (data.invoice_no) setNewInvoiceNo(data.invoice_no);
       if (data.service_date) setNewDate(data.service_date);
       if (data.odometer) setNewOdometer(String(data.odometer));
@@ -239,7 +258,7 @@ export default function Dashboard() {
       setShowUploadForm(true);
 
     } catch (err: any) {
-      console.error("AI Error Debug details:", err);
+      console.error("AI Error:", err);
       alert(`AI was unable to process the receipt: ${err.message || "Unknown error"}. Please try another photo or enter details manually.`);
     } finally {
       setScanning(false);
