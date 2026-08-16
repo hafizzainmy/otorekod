@@ -20,15 +20,48 @@ export async function POST(request: Request) {
       return NextResponse.json({ error: "Missing file parameter" }, { status: 400 });
     }
 
-    // Strip data URI prefix if present
     if (file.includes(",")) {
       file = file.split(",")[1];
     }
 
-    // Auto-detect PDF vs Image MIME types
     if (!mimeType || mimeType === "application/x-pdf" || mimeType === "binary/octet-stream") {
       mimeType = file.startsWith("JVBERi") ? "application/pdf" : "image/jpeg";
     }
+
+    // 1. Automatically fetch the list of available models for this API key
+    let selectedModel = "models/gemini-1.5-flash";
+    try {
+      const listRes = await fetch(
+        `https://generativelanguage.googleapis.com/v1beta/models?key=${apiKey}`
+      );
+      const listData = await listRes.json();
+
+      if (listData.models && Array.isArray(listData.models)) {
+        // Find all models that support generateContent
+        const available = listData.models.filter((m: any) =>
+          m.supportedGenerationMethods?.includes("generateContent")
+        );
+
+        // Prefer flash/vision models
+        const preferred = available.find(
+          (m: any) =>
+            m.name.includes("flash") ||
+            m.name.includes("1.5") ||
+            m.name.includes("2.0")
+        );
+
+        if (preferred) {
+          selectedModel = preferred.name;
+        } else if (available.length > 0) {
+          selectedModel = available[0].name;
+        }
+      }
+    } catch (e) {
+      console.warn("Could not list models, falling back to default name");
+    }
+
+    // Ensure model name has 'models/' prefix removed if needed for URL
+    const cleanModelName = selectedModel.replace(/^models\//, "");
 
     const promptText = `
       You are an expert Malaysian automotive workshop invoice parser.
@@ -51,81 +84,59 @@ export async function POST(request: Request) {
       }
     `;
 
-    // Candidate models to try in order
-    const modelsToTry = [
-      "gemini-1.5-flash",
-      "gemini-1.5-flash-latest",
-      "gemini-2.0-flash-exp",
-      "gemini-1.5-pro"
-    ];
-
-    let lastErrorDetails = "";
-    let parsedData = null;
-
-    for (const model of modelsToTry) {
-      try {
-        const response = await fetch(
-          `https://generativelanguage.googleapis.com/v1beta/models/${model}:generateContent?key=${apiKey}`,
-          {
-            method: "POST",
-            headers: {
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              contents: [
+    // 2. Call the active model
+    const response = await fetch(
+      `https://generativelanguage.googleapis.com/v1beta/models/${cleanModelName}:generateContent?key=${apiKey}`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          contents: [
+            {
+              parts: [
+                { text: promptText },
                 {
-                  parts: [
-                    { text: promptText },
-                    {
-                      inline_data: {
-                        mime_type: mimeType,
-                        data: file,
-                      },
-                    },
-                  ],
+                  inline_data: {
+                    mime_type: mimeType,
+                    data: file,
+                  },
                 },
               ],
-              generationConfig: {
-                response_mime_type: "application/json",
-              },
-            }),
-          }
-        );
-
-        const data = await response.json();
-
-        if (!response.ok) {
-          lastErrorDetails = data.error?.message || response.statusText;
-          continue; // Try next model
-        }
-
-        const candidateText = data.candidates?.[0]?.content?.parts?.[0]?.text;
-        if (!candidateText) {
-          lastErrorDetails = "Empty response from AI";
-          continue;
-        }
-
-        const cleanJson = candidateText
-          .replace(/^```json\s*/i, "")
-          .replace(/^```\s*/i, "")
-          .replace(/```$/i, "")
-          .trim();
-
-        parsedData = JSON.parse(cleanJson);
-        if (parsedData) break; // Successfully parsed!
-
-      } catch (err: any) {
-        lastErrorDetails = err.message;
+            },
+          ],
+          generationConfig: {
+            response_mime_type: "application/json",
+          },
+        }),
       }
-    }
+    );
 
-    if (!parsedData) {
+    const data = await response.json();
+
+    if (!response.ok) {
       return NextResponse.json(
-        { error: `Google API Error: ${lastErrorDetails}` },
+        { error: data.error?.message || response.statusText },
         { status: 500 }
       );
     }
 
+    const candidateText = data.candidates?.[0]?.content?.parts?.[0]?.text;
+    if (!candidateText) {
+      return NextResponse.json(
+        { error: "AI returned an empty response. Please try another clear photo/PDF." },
+        { status: 500 }
+      );
+    }
+
+    const cleanJson = candidateText
+      .replace(/^```json\s*/i, "")
+      .replace(/^```\s*/i, "")
+      .replace(/```$/i, "")
+      .trim();
+
+    const parsedData = JSON.parse(cleanJson);
     return NextResponse.json(parsedData);
 
   } catch (error: any) {
