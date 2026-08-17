@@ -19,7 +19,11 @@ import {
   Trash2,
   Sparkles,
   Camera,
-  FolderOpen
+  FolderOpen,
+  ShieldCheck,
+  Phone,
+  MapPin,
+  AlertCircle
 } from "lucide-react";
 
 interface Vehicle {
@@ -43,6 +47,10 @@ interface Receipt {
   service_date: string;
   odometer: number;
   workshop_name: string;
+  company_reg_no?: string;
+  workshop_address?: string;
+  workshop_phone?: string;
+  workshop_email?: string;
   total_amount: number;
   items_summary: string;
   invoice_no?: string;
@@ -53,7 +61,6 @@ export default function Dashboard() {
   const supabase = createClient();
   const router = useRouter();
   
-  // Refs for different upload methods
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
@@ -71,7 +78,12 @@ export default function Dashboard() {
   const [newDate, setNewDate] = useState("");
   const [newOdometer, setNewOdometer] = useState("");
   const [newWorkshop, setNewWorkshop] = useState("");
+  const [newCompanyRegNo, setNewCompanyRegNo] = useState("");
+  const [newWorkshopAddress, setNewWorkshopAddress] = useState("");
+  const [newWorkshopPhone, setNewWorkshopPhone] = useState("");
+  const [newWorkshopEmail, setNewWorkshopEmail] = useState("");
   const [newInvoiceNo, setNewInvoiceNo] = useState("");
+  const [isScheduledService, setIsScheduledService] = useState(false);
   const [submitting, setSubmitting] = useState(false);
 
   // Dynamic Line Items State
@@ -101,7 +113,7 @@ export default function Dashboard() {
           .from("receipts")
           .select("*")
           .eq("vehicle_id", dbVehicles[0].id)
-          .order("service_date", { ascending: false });
+          .order("service_date", { ascending: false }); // ALWAYS latest first
 
         if (dbReceipts) {
           const categorized = dbReceipts.map((r) => {
@@ -141,7 +153,7 @@ export default function Dashboard() {
     setExpandedReceipts(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  // 1. Helper to compress standard camera/gallery photos
+  // Image Compressor
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -177,11 +189,10 @@ export default function Dashboard() {
     });
   };
 
-  // 2. Helper to convert any uploaded PDF into a clean image for OpenAI
+  // PDF to Image Converter
   const convertPdfToImage = async (file: File): Promise<string> => {
     return new Promise(async (resolve, reject) => {
       try {
-        // Load pdf.js dynamically if not already loaded
         if (!(window as any).pdfjsLib) {
           await new Promise((res, rej) => {
             const script = document.createElement("script");
@@ -200,14 +211,13 @@ export default function Dashboard() {
         const pdf = await (window as any).pdfjsLib.getDocument({ data: arrayBuffer }).promise;
         const page = await pdf.getPage(1);
 
-        const viewport = page.getViewport({ scale: 2.0 }); // High resolution for OCR
+        const viewport = page.getViewport({ scale: 2.0 });
         const canvas = document.createElement("canvas");
         const context = canvas.getContext("2d");
         canvas.height = viewport.height;
         canvas.width = viewport.width;
 
         await page.render({ canvasContext: context, viewport }).promise;
-
         const dataUrl = canvas.toDataURL("image/jpeg", 0.8);
         resolve(dataUrl.split(",")[1]);
       } catch (err) {
@@ -216,7 +226,7 @@ export default function Dashboard() {
     });
   };
 
-  // 3. Main Scanner Execution (Handles both Images & PDFs seamlessly)
+  // Main AI Scanner
   const handleAIScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -241,11 +251,18 @@ export default function Dashboard() {
 
       if (!res.ok) throw new Error(data.error || "Failed to scan file");
 
+      // Populate extracted authenticity metadata
       if (data.invoice_no) setNewInvoiceNo(data.invoice_no);
       if (data.service_date) setNewDate(data.service_date);
       if (data.odometer) setNewOdometer(String(data.odometer));
       if (data.workshop_name) setNewWorkshop(data.workshop_name);
+      if (data.company_reg_no) setNewCompanyRegNo(data.company_reg_no);
+      if (data.workshop_address) setNewWorkshopAddress(data.workshop_address);
+      if (data.workshop_phone) setNewWorkshopPhone(data.workshop_phone);
+      if (data.workshop_email) setNewWorkshopEmail(data.workshop_email);
+      if (data.is_scheduled_service !== undefined) setIsScheduledService(data.is_scheduled_service);
       
+      // Populate full item descriptions
       if (data.line_items && data.line_items.length > 0) {
         setLineItems(data.line_items.map((item: any) => ({
           description: item.description || "",
@@ -259,7 +276,7 @@ export default function Dashboard() {
 
     } catch (err: any) {
       console.error("AI Error:", err);
-      alert(`AI was unable to process the receipt: ${err.message || "Unknown error"}. Please try another photo or enter details manually.`);
+      alert(`AI was unable to process the receipt: ${err.message || "Unknown error"}. Please enter details manually.`);
     } finally {
       setScanning(false);
       if (fileInputRef.current) fileInputRef.current.value = "";
@@ -301,39 +318,57 @@ export default function Dashboard() {
     e.preventDefault();
     if (!activeVehicle || submitting) return;
 
+    if (!newDate) {
+      alert("Please specify the Service Date (Top Priority).");
+      return;
+    }
+
     setSubmitting(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
     const totalCalculated = calculateTotalAmount();
     const serializedItems = JSON.stringify(lineItems);
+    const parsedOdo = parseInt(newOdometer, 10) || 0;
 
     const { data: newRecord, error } = await supabase.from("receipts").insert({
       vehicle_id: activeVehicle.id,
       user_id: user.id,
       service_date: newDate,
-      odometer: parseInt(newOdometer, 10) || 0,
+      odometer: parsedOdo,
       workshop_name: newWorkshop,
+      company_reg_no: newCompanyRegNo,
+      workshop_address: newWorkshopAddress,
+      workshop_phone: newWorkshopPhone,
+      workshop_email: newWorkshopEmail,
       invoice_no: newInvoiceNo,
       total_amount: totalCalculated,
       items_summary: serializedItems
     }).select().single();
 
     if (!error && newRecord) {
-      if (parseInt(newOdometer, 10) > activeVehicle.current_odometer) {
+      if (parsedOdo > activeVehicle.current_odometer) {
         await supabase
           .from("vehicles")
-          .update({ current_odometer: parseInt(newOdometer, 10) })
+          .update({ current_odometer: parsedOdo })
           .eq("id", activeVehicle.id);
-        setActiveVehicle({ ...activeVehicle, current_odometer: parseInt(newOdometer, 10) });
+        setActiveVehicle({ ...activeVehicle, current_odometer: parsedOdo });
       }
 
-      setReceipts([{ ...newRecord, category: "Service" }, ...receipts]);
+      // Re-sort list by date descending immediately
+      const updatedList = [{ ...newRecord, category: "Service" }, ...receipts].sort(
+        (a, b) => new Date(b.service_date).getTime() - new Date(a.service_date).getTime()
+      );
+      setReceipts(updatedList);
       
       // Reset State
       setNewDate("");
       setNewOdometer("");
       setNewWorkshop("");
+      setNewCompanyRegNo("");
+      setNewWorkshopAddress("");
+      setNewWorkshopPhone("");
+      setNewWorkshopEmail("");
       setNewInvoiceNo("");
       setLineItems([{ description: "", quantity: 1, unit_price: 0, total: 0 }]);
       setShowUploadForm(false);
@@ -344,7 +379,7 @@ export default function Dashboard() {
   const totalSpent = receipts.reduce((sum, r) => sum + Number(r.total_amount), 0);
   const totalServices = receipts.length;
   const lastServiceDate = receipts[0] 
-    ? new Date(receipts[0].service_date).toLocaleDateString("en-MY", { month: "short", year: "numeric" })
+    ? new Date(receipts[0].service_date).toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" })
     : "No records";
   const lastWorkshop = receipts[0]?.workshop_name || "N/A";
 
@@ -370,7 +405,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-slate-800 antialiased">
       
-      {/* 1. HIDDEN SYSTEM CONTROLS (FILE & NATIVE CAMERA INPUTS) */}
+      {/* 1. HIDDEN SYSTEM INPUTS */}
       <input 
         type="file"
         ref={fileInputRef}
@@ -398,13 +433,11 @@ export default function Dashboard() {
             <span className="text-xl font-black tracking-tight text-slate-900">OtoRekod</span>
           </div>
 
-          {/* Action buttons */}
           <div className="flex items-center gap-2">
             <button 
               disabled={scanning}
               onClick={() => cameraInputRef.current?.click()}
               className="flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition disabled:opacity-50"
-              title="Take receipt photo"
             >
               <Camera size={14} />
               <span className="hidden sm:inline">Take Photo</span>
@@ -414,16 +447,14 @@ export default function Dashboard() {
               disabled={scanning}
               onClick={() => fileInputRef.current?.click()}
               className="flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 text-xs font-bold text-indigo-700 transition disabled:opacity-50"
-              title="Upload PDF or Image file"
             >
               <FolderOpen size={14} />
-              <span className="hidden sm:inline">Upload File</span>
+              <span className="hidden sm:inline">Upload PDF / File</span>
             </button>
 
             <button 
               onClick={() => setShowUploadForm(!showUploadForm)}
               className="flex items-center gap-1.5 rounded-lg bg-emerald-600 hover:bg-emerald-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition"
-              title="Enter invoice manually"
             >
               <Upload size={14} />
               <span className="hidden sm:inline">Manual</span>
@@ -432,7 +463,6 @@ export default function Dashboard() {
             <button 
               onClick={handleSignOut}
               className="flex items-center gap-1.5 rounded-lg border border-slate-200 bg-white hover:bg-slate-50 px-2.5 py-2 text-xs font-bold text-slate-600 shadow-sm transition"
-              title="Sign out of OtoRekod"
             >
               <LogOut size={14} />
             </button>
@@ -440,16 +470,16 @@ export default function Dashboard() {
         </div>
       </header>
 
-      {/* AI Processing Loading Overlay */}
+      {/* AI Processing Overlay */}
       {scanning && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-slate-900/60 backdrop-blur-sm text-white p-4">
           <div className="bg-slate-900 rounded-2xl p-6 border border-indigo-500/30 flex flex-col items-center shadow-2xl max-w-sm text-center">
             <div className="animate-spin rounded-full h-10 w-10 border-t-2 border-b-2 border-indigo-400 mb-4"></div>
             <h3 className="font-extrabold text-base text-indigo-300 flex items-center gap-2">
               <Sparkles size={16} className="animate-pulse" />
-              OtoRekod AI Parsing...
+              OtoRekod AI Auditing...
             </h3>
-            <p className="text-xs text-slate-400 mt-2">Reading invoice details and structuring individual line items. This takes about 5 seconds.</p>
+            <p className="text-xs text-slate-400 mt-2">Extracting workshop authenticity (SSM, Phone, Address), service date, and expanding part descriptions.</p>
           </div>
         </div>
       )}
@@ -460,64 +490,128 @@ export default function Dashboard() {
         {showUploadForm && activeVehicle && (
           <div className="mb-8 rounded-2xl border-2 border-indigo-200 bg-white p-6 shadow-lg animate-in slide-in-from-top duration-300">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-5">
-              <h3 className="font-bold text-slate-800 flex items-center gap-1.5 text-base">
-                <Sparkles className="text-indigo-600" size={18} />
-                Verify & Save Invoice Details
-              </h3>
+              <div>
+                <h3 className="font-bold text-slate-800 flex items-center gap-1.5 text-base">
+                  <ShieldCheck className="text-emerald-600" size={18} />
+                  Verify Invoice & Workshop Authenticity
+                </h3>
+                <p className="text-xs text-slate-400 mt-0.5">Please review the details extracted by AI before saving to your Passport.</p>
+              </div>
               <button onClick={() => setShowUploadForm(false)} className="text-slate-400 hover:text-slate-600 transition">
                 <X size={18} />
               </button>
             </div>
 
-            <form onSubmit={handleAddReceipt} className="space-y-6">
-              <div className="grid grid-cols-1 md:grid-cols-4 gap-4">
+            {/* Mileage Encouragement Banner if Scheduled Service detected */}
+            {isScheduledService && (!newOdometer || newOdometer === "0") && (
+              <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-800">
+                <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
                 <div>
-                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Invoice / Receipt No</label>
-                  <input 
-                    type="text" 
-                    placeholder="e.g. INV-9921"
-                    value={newInvoiceNo} 
-                    onChange={e => setNewInvoiceNo(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
-                  />
+                  <span className="font-bold">Scheduled Maintenance Detected:</span> Please provide the odometer reading if available. Recording mileage for oil and fluid services maximizes your vehicle's resale passport value.
                 </div>
+              </div>
+            )}
+
+            <form onSubmit={handleAddReceipt} className="space-y-6">
+              {/* PRIMARY METADATA */}
+              <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
                 <div>
-                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Service Date</label>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    Service Date <span className="text-red-500">* (Top Priority)</span>
+                  </label>
                   <input 
                     type="date" 
                     required 
                     value={newDate} 
                     onChange={e => setNewDate(e.target.value)}
-                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                    className="w-full rounded-lg border-2 border-indigo-200 bg-indigo-50/30 p-2.5 text-sm font-semibold text-slate-800 focus:border-indigo-500 focus:outline-none" 
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Odometer (KM)</label>
+                  <label className="block text-xs font-bold text-slate-700 uppercase mb-1">
+                    Odometer (KM) {isScheduledService && <span className="text-amber-600 font-bold">(Recommended)</span>}
+                  </label>
                   <input 
                     type="number" 
-                    required 
-                    placeholder="Current Mileage"
+                    placeholder="e.g. 75000"
                     value={newOdometer} 
                     onChange={e => setNewOdometer(e.target.value)}
                     className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
                   />
                 </div>
                 <div>
-                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Workshop Name</label>
+                  <label className="block text-xs font-bold text-slate-400 uppercase mb-1">Invoice / Receipt No</label>
                   <input 
                     type="text" 
-                    required 
-                    placeholder="e.g. Bengkel Wira Jaya"
-                    value={newWorkshop} 
-                    onChange={e => setNewWorkshop(e.target.value)}
+                    placeholder="e.g. INV-2026-99"
+                    value={newInvoiceNo} 
+                    onChange={e => setNewInvoiceNo(e.target.value)}
                     className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
                   />
                 </div>
               </div>
 
-              {/* Dynamic Line Items Section */}
+              {/* WORKSHOP AUTHENTICITY SECTION */}
+              <div className="rounded-xl border border-slate-100 bg-slate-50/60 p-4 space-y-4">
+                <div className="flex items-center gap-2">
+                  <ShieldCheck size={16} className="text-slate-500" />
+                  <span className="text-xs font-bold uppercase tracking-wider text-slate-600">Workshop Authenticity Details</span>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-2 gap-3">
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Workshop / Bengkel Name</label>
+                    <input 
+                      type="text" 
+                      required 
+                      placeholder="e.g. Perodua Service Centre Glenmarie"
+                      value={newWorkshop} 
+                      onChange={e => setNewWorkshop(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Company Registration No (SSM / ROC)</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. 201901032145 (1341475-M)"
+                      value={newCompanyRegNo} 
+                      onChange={e => setNewCompanyRegNo(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                    />
+                  </div>
+                </div>
+
+                <div className="grid grid-cols-1 md:grid-cols-3 gap-3">
+                  <div className="md:col-span-2">
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Full Workshop Address</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. No. 12, Jalan Utarid U5/14, Seksyen U5, 40150 Shah Alam, Selangor"
+                      value={newWorkshopAddress} 
+                      onChange={e => setNewWorkshopAddress(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                    />
+                  </div>
+                  <div>
+                    <label className="block text-[11px] font-bold text-slate-500 uppercase mb-1">Phone / WhatsApp</label>
+                    <input 
+                      type="text" 
+                      placeholder="e.g. 03-7845 1234 / 012-3456789"
+                      value={newWorkshopPhone} 
+                      onChange={e => setNewWorkshopPhone(e.target.value)}
+                      className="w-full rounded-lg border border-slate-200 bg-white p-2.5 text-sm focus:border-indigo-500 focus:outline-none" 
+                    />
+                  </div>
+                </div>
+              </div>
+
+              {/* DYNAMIC LINE ITEMS (EXPANDED DESCRIPTIONS) */}
               <div className="border-t border-slate-100 pt-4">
-                <h4 className="text-xs font-bold text-slate-500 uppercase tracking-wider mb-3">Invoice Line Items</h4>
+                <div className="flex items-center justify-between mb-3">
+                  <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Itemized Parts & Labor Summary</h4>
+                  <span className="text-[11px] text-slate-400">AI expands cryptic OEM codes into full part names</span>
+                </div>
                 
                 <div className="space-y-3">
                   {lineItems.map((item, index) => (
@@ -526,13 +620,13 @@ export default function Dashboard() {
                         <input 
                           type="text" 
                           required
-                          placeholder="Item description"
+                          placeholder="Detailed part or labor description (e.g. Fully Synthetic 5W-40 Engine Oil)"
                           value={item.description}
                           onChange={e => handleLineItemChange(index, "description", e.target.value)}
                           className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
                         />
                       </div>
-                      <div className="w-full md:w-24">
+                      <div className="w-full md:w-20">
                         <input 
                           type="number" 
                           required
@@ -547,13 +641,13 @@ export default function Dashboard() {
                           type="number" 
                           step="0.01"
                           required
-                          placeholder="Unit Price (RM)"
+                          placeholder="Unit (RM)"
                           value={item.unit_price || ""}
                           onChange={e => handleLineItemChange(index, "unit_price", e.target.value)}
                           className="w-full rounded-lg border border-slate-200 p-2.5 text-sm text-right focus:border-indigo-500 focus:outline-none"
                         />
                       </div>
-                      <div className="w-full md:w-32 text-right font-bold text-slate-700 px-2 text-sm">
+                      <div className="w-full md:w-32 text-right font-bold text-slate-800 px-2 text-sm">
                         RM {item.total.toFixed(2)}
                       </div>
                       {lineItems.length > 1 && (
@@ -575,15 +669,17 @@ export default function Dashboard() {
                   className="mt-4 flex items-center gap-1 text-xs font-bold text-indigo-600 hover:text-indigo-700 transition"
                 >
                   <Plus size={14} />
-                  Add Line Item
+                  Add Another Line Item
                 </button>
               </div>
 
-              {/* Form Footer & Calculations */}
+              {/* FORM FOOTER */}
               <div className="border-t border-slate-100 pt-5 flex flex-col md:flex-row items-center justify-between gap-4 bg-slate-50/50 p-4 rounded-xl">
                 <div className="text-sm">
-                  <span className="text-slate-400 font-semibold uppercase tracking-wider text-xs">Calculated Total: </span>
-                  <span className="font-extrabold text-slate-800 text-lg ml-1">RM {calculateTotalAmount().toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                  <span className="text-slate-400 font-semibold uppercase tracking-wider text-xs">Total Amount: </span>
+                  <span className="font-extrabold text-slate-800 text-lg ml-1">
+                    RM {calculateTotalAmount().toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                  </span>
                 </div>
 
                 <div className="flex gap-3 w-full md:w-auto">
@@ -599,7 +695,7 @@ export default function Dashboard() {
                     disabled={submitting}
                     className="w-full md:w-auto rounded-lg bg-emerald-600 hover:bg-emerald-700 px-6 py-2.5 text-sm font-bold text-white transition disabled:opacity-50 shadow-sm"
                   >
-                    {submitting ? "Saving..." : "Save Invoice"}
+                    {submitting ? "Saving to Passport..." : "Save Verified Invoice"}
                   </button>
                 </div>
               </div>
@@ -622,7 +718,7 @@ export default function Dashboard() {
                     {activeVehicle.plate_number.toUpperCase()}
                   </div>
                   <span className="text-sm font-medium text-slate-500">
-                    {activeVehicle.year} • Verified History
+                    {activeVehicle.year} • Chronological Verified Records
                   </span>
                 </div>
               </div>
@@ -644,14 +740,14 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 5. FOUR STAT SUMMARY CARDS */}
+            {/* 5. STAT SUMMARY CARDS */}
             <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-4">
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Current Odometer</span>
                 <div className="mt-2 text-2xl font-black text-slate-950">
                   {activeVehicle.current_odometer.toLocaleString()} <span className="text-sm font-normal text-slate-500">km</span>
                 </div>
-                <span className="text-[10px] text-slate-400 mt-1 block">Updated via last upload</span>
+                <span className="text-[10px] text-slate-400 mt-1 block">Updated via latest service</span>
               </div>
 
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
@@ -669,8 +765,8 @@ export default function Dashboard() {
               </div>
 
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
-                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Last Service</span>
-                <div className="mt-2 text-lg font-bold text-slate-950 truncate">{lastServiceDate}</div>
+                <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Latest Record</span>
+                <div className="mt-2 text-sm font-bold text-slate-950 truncate">{lastServiceDate}</div>
                 <span className="text-[10px] text-slate-400 mt-1 block truncate">{lastWorkshop}</span>
               </div>
             </div>
@@ -684,7 +780,7 @@ export default function Dashboard() {
                     activeTab === "timeline" ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-400 hover:text-slate-600"
                   }`}
                 >
-                  Timeline
+                  Chronological Timeline (Latest First)
                 </button>
                 <button 
                   onClick={() => setActiveTab("analytics")}
@@ -697,11 +793,11 @@ export default function Dashboard() {
               </nav>
             </div>
 
-            {/* 7. TIMELINE BODY */}
+            {/* 7. TIMELINE BODY (LATEST ON TOP) */}
             {activeTab === "timeline" ? (
               <div className="space-y-4">
                 <div className="flex items-center justify-between text-xs text-slate-400 font-semibold mb-2">
-                  <span>{receipts.length} records • most recent first</span>
+                  <span>{receipts.length} verified records • sorted by newest service date</span>
                   <div className="hidden md:flex items-center gap-3">
                     <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-emerald-500"></span>Service</span>
                     <span className="flex items-center gap-1.5"><span className="h-2 w-2 rounded-full bg-amber-500"></span>Brakes</span>
@@ -737,13 +833,13 @@ export default function Dashboard() {
                       key={receipt.id} 
                       className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
                     >
-                      {/* Main Timeline Bar Accordion Trigger */}
+                      {/* Top Bar Header */}
                       <div 
                         onClick={() => toggleExpand(receipt.id)}
                         className="flex cursor-pointer items-center justify-between p-5 select-none"
                       >
                         <div className="flex items-center gap-4">
-                          <div className="flex flex-col items-center justify-center border-r border-slate-100 pr-4 text-center min-w-[50px]">
+                          <div className="flex flex-col items-center justify-center border-r border-slate-100 pr-4 text-center min-w-[55px]">
                             <span className="text-xl font-black text-slate-800 leading-none">{day}</span>
                             <span className="text-[10px] font-bold text-slate-400 mt-1">{month}</span>
                             <span className="text-[9px] text-slate-300 font-semibold">{year}</span>
@@ -755,15 +851,24 @@ export default function Dashboard() {
                                 <span className={`h-1.5 w-1.5 rounded-full ${dotColor}`}></span>
                                 {receipt.category}
                               </span>
-                              <span className="text-xs font-semibold text-slate-400">
-                                {receipt.odometer.toLocaleString()} km
-                              </span>
+
+                              {receipt.odometer > 0 ? (
+                                <span className="text-xs font-semibold text-slate-600 bg-slate-100 px-2 py-0.5 rounded">
+                                  {receipt.odometer.toLocaleString()} km
+                                </span>
+                              ) : (
+                                <span className="text-[10px] text-slate-400 italic">
+                                  Mileage not logged
+                                </span>
+                              )}
+
                               {receipt.invoice_no && (
-                                <span className="text-[10px] font-semibold text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+                                <span className="text-[10px] font-semibold text-slate-400 bg-slate-50 border border-slate-100 px-1.5 py-0.5 rounded">
                                   #{receipt.invoice_no}
                                 </span>
                               )}
                             </div>
+                            
                             <h4 className="mt-1 font-bold text-slate-800 text-sm md:text-base leading-snug group-hover:text-emerald-700 transition">
                               {receipt.workshop_name}
                             </h4>
@@ -780,59 +885,78 @@ export default function Dashboard() {
                         </div>
                       </div>
 
-                      {/* Expanded Section showing the itemized invoice table */}
+                      {/* Expanded Section */}
                       {isExpanded && (
                         <div className="border-t border-slate-100 bg-[#fafcfd] p-5">
-                          <div className="max-w-3xl md:pl-12">
-                            <h5 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-3">Itemized Invoice Summary</h5>
+                          <div className="max-w-3xl md:pl-12 space-y-4">
                             
-                            {parsed.isJson ? (
-                              /* Structured Invoice View */
-                              <div className="overflow-x-auto rounded-lg border border-slate-100 bg-white">
-                                <table className="w-full text-left text-xs">
-                                  <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100">
-                                    <tr>
-                                      <th className="px-4 py-2.5">Item Description</th>
-                                      <th className="px-4 py-2.5 text-center w-16">Qty</th>
-                                      <th className="px-4 py-2.5 text-right w-32">Unit (RM)</th>
-                                      <th className="px-4 py-2.5 text-right w-32">Total (RM)</th>
-                                    </tr>
-                                  </thead>
-                                  <tbody className="divide-y divide-slate-100 font-medium text-slate-600">
-                                    {parsed.data.map((item: InvoiceLineItem, idx: number) => (
-                                      <tr key={idx} className="hover:bg-slate-50/50">
-                                        <td className="px-4 py-2.5 font-semibold text-slate-700">{item.description}</td>
-                                        <td className="px-4 py-2.5 text-center">{item.quantity}</td>
-                                        <td className="px-4 py-2.5 text-right">{Number(item.unit_price).toFixed(2)}</td>
-                                        <td className="px-4 py-2.5 text-right font-bold text-slate-700">{Number(item.total).toFixed(2)}</td>
-                                      </tr>
-                                    ))}
-                                    {/* Subtotal row */}
-                                    <tr className="bg-slate-50/50 font-bold">
-                                      <td colSpan={3} className="px-4 py-3 text-right text-slate-500 uppercase tracking-wider text-[10px]">Total Amount</td>
-                                      <td className="px-4 py-3 text-right text-slate-900 text-sm">RM {Number(receipt.total_amount).toFixed(2)}</td>
-                                    </tr>
-                                  </tbody>
-                                </table>
+                            {/* Workshop Authenticity Card */}
+                            {(receipt.company_reg_no || receipt.workshop_address || receipt.workshop_phone) && (
+                              <div className="rounded-lg border border-slate-200 bg-white p-3 text-xs space-y-1.5">
+                                <div className="flex items-center gap-1.5 font-bold text-slate-700">
+                                  <ShieldCheck size={14} className="text-emerald-600" />
+                                  <span>Workshop Profile & Verification</span>
+                                  {receipt.company_reg_no && (
+                                    <span className="ml-1 text-[10px] font-normal text-slate-400 bg-slate-100 px-1.5 py-0.5 rounded">
+                                      ROC: {receipt.company_reg_no}
+                                    </span>
+                                  )}
+                                </div>
+                                {receipt.workshop_address && (
+                                  <div className="flex items-start gap-1.5 text-slate-500 text-[11px]">
+                                    <MapPin size={12} className="shrink-0 mt-0.5 text-slate-400" />
+                                    <span>{receipt.workshop_address}</span>
+                                  </div>
+                                )}
+                                {receipt.workshop_phone && (
+                                  <div className="flex items-center gap-1.5 text-slate-500 text-[11px]">
+                                    <Phone size={12} className="text-slate-400" />
+                                    <span>{receipt.workshop_phone}</span>
+                                  </div>
+                                )}
                               </div>
-                            ) : (
-                              /* Legacy fallback list view */
-                              <ul className="space-y-2.5 bg-white p-4 rounded-lg border border-slate-100">
-                                {parsed.data.map((item: string, index: number) => (
-                                  <li key={index} className="flex items-center gap-2 text-xs font-medium text-slate-600 border-b border-dashed border-slate-100 pb-2">
-                                    <span className="h-1.5 w-1.5 rounded-full bg-slate-300"></span>
-                                    <span>{item}</span>
-                                  </li>
-                                ))}
-                              </ul>
                             )}
 
-                            <div className="mt-5 pt-4 border-t border-slate-100 flex items-center justify-between text-xs text-slate-400">
-                              <span>Receipt #RCP-{receipt.id.slice(0,8).toUpperCase()}</span>
-                              <button className="flex items-center gap-1 rounded bg-white border border-slate-200 px-2.5 py-1.5 text-[11px] font-semibold text-slate-600 hover:bg-slate-50 shadow-sm transition">
-                                <FileText size={12} />
-                                View Original Invoice
-                              </button>
+                            {/* Line Items Table */}
+                            <div>
+                              <h5 className="text-[10px] font-bold uppercase tracking-wider text-slate-400 mb-2">Itemized Summary</h5>
+                              {parsed.isJson ? (
+                                <div className="overflow-x-auto rounded-lg border border-slate-100 bg-white">
+                                  <table className="w-full text-left text-xs">
+                                    <thead className="bg-slate-50 text-[10px] uppercase font-bold text-slate-400 border-b border-slate-100">
+                                      <tr>
+                                        <th className="px-4 py-2.5">Item Description</th>
+                                        <th className="px-4 py-2.5 text-center w-16">Qty</th>
+                                        <th className="px-4 py-2.5 text-right w-28">Unit (RM)</th>
+                                        <th className="px-4 py-2.5 text-right w-28">Total (RM)</th>
+                                      </tr>
+                                    </thead>
+                                    <tbody className="divide-y divide-slate-100 font-medium text-slate-600">
+                                      {parsed.data.map((item: InvoiceLineItem, idx: number) => (
+                                        <tr key={idx} className="hover:bg-slate-50/50">
+                                          <td className="px-4 py-2.5 font-semibold text-slate-700">{item.description}</td>
+                                          <td className="px-4 py-2.5 text-center">{item.quantity}</td>
+                                          <td className="px-4 py-2.5 text-right">{Number(item.unit_price).toFixed(2)}</td>
+                                          <td className="px-4 py-2.5 text-right font-bold text-slate-700">{Number(item.total).toFixed(2)}</td>
+                                        </tr>
+                                      ))}
+                                      <tr className="bg-slate-50/50 font-bold">
+                                        <td colSpan={3} className="px-4 py-2.5 text-right text-slate-500 uppercase tracking-wider text-[10px]">Total Amount</td>
+                                        <td className="px-4 py-2.5 text-right text-slate-900 text-sm">RM {Number(receipt.total_amount).toFixed(2)}</td>
+                                      </tr>
+                                    </tbody>
+                                  </table>
+                                </div>
+                              ) : (
+                                <ul className="space-y-2 bg-white p-3 rounded-lg border border-slate-100">
+                                  {parsed.data.map((item: string, index: number) => (
+                                    <li key={index} className="flex items-center gap-2 text-xs font-medium text-slate-600 border-b border-dashed border-slate-100 pb-1.5">
+                                      <span className="h-1.5 w-1.5 rounded-full bg-slate-300"></span>
+                                      <span>{item}</span>
+                                    </li>
+                                  ))}
+                                </ul>
+                              )}
                             </div>
                           </div>
                         </div>
@@ -845,7 +969,7 @@ export default function Dashboard() {
               <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-slate-500 shadow-sm">
                 <TrendingUp size={36} className="mx-auto text-slate-300 mb-3" />
                 <h4 className="font-bold text-slate-800 mb-1">Maintenance Expense Analytics</h4>
-                <p className="text-sm text-slate-400 max-w-md mx-auto">This section uses historical local workshop data to plot cost analytics, showing whether you are spending below or above average relative to similar car models.</p>
+                <p className="text-sm text-slate-400 max-w-md mx-auto">Track cost benchmarks and service intervals across your historical data.</p>
               </div>
             )}
           </div>
