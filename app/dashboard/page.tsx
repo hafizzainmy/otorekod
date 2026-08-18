@@ -26,9 +26,6 @@ import {
   AlertCircle
 } from "lucide-react";
 
-// ==========================================
-// 1. DATA CONTRACTS & INTERFACES
-// ==========================================
 interface Vehicle {
   id: string;
   plate_number: string;
@@ -96,9 +93,6 @@ export default function Dashboard() {
   const fileInputRef = useRef<HTMLInputElement>(null);
   const cameraInputRef = useRef<HTMLInputElement>(null);
 
-  // ==========================================
-  // 2. COMPONENT STATE MANAGEMENT
-  // ==========================================
   const [loading, setLoading] = useState(true);
   const [vehicles, setVehicles] = useState<Vehicle[]>([]);
   const [activeVehicle, setActiveVehicle] = useState<Vehicle | null>(null);
@@ -126,9 +120,6 @@ export default function Dashboard() {
     { description: "", quantity: 1, unit_price: 0, total: 0 }
   ]);
 
-  // ==========================================
-  // 3. DATA FETCHING (SUPABASE)
-  // ==========================================
   useEffect(() => {
     async function fetchData() {
       const { data: { user } } = await supabase.auth.getUser();
@@ -191,9 +182,169 @@ export default function Dashboard() {
     setExpandedReceipts(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  // ==========================================
-  // 4. CLIENT MEDIA PROCESSING HELPERS
-  // ==========================================
+  // 1. SMART NEXT SERVICE DUE PREDICTOR
+  const calculateNextService = (
+    vehicle: Vehicle | null, 
+    receiptsList: Receipt[]
+  ): ServiceForecast | null => {
+    if (!vehicle || receiptsList.length === 0) return null;
+
+    const latestRecord = receiptsList.find(r => r.odometer > 0) || receiptsList[0];
+    if (!latestRecord) return null;
+
+    const currentOdo = vehicle.current_odometer || latestRecord.odometer || 0;
+    const lastOdo = latestRecord.odometer || currentOdo;
+    const lastDate = new Date(latestRecord.service_date);
+
+    const summaryLower = (latestRecord.items_summary || "").toLowerCase();
+    
+    let intervalKm = 10000;
+    let intervalMonths = 6;
+    let serviceType = "Next Engine Oil & Filter Service";
+    let recommendation = "Recommended: Fully Synthetic 0W-20 / 5W-30 + OEM Oil Filter";
+
+    if (summaryLower.includes("gearbox") || summaryLower.includes("atf") || summaryLower.includes("cvt") || summaryLower.includes("transmission")) {
+      intervalKm = 20000;
+      intervalMonths = 12;
+      serviceType = "Transmission / Gear Oil Interval";
+      recommendation = "Recommended: Genuine Manufacturer CVT / ATF Fluid";
+    } else if (summaryLower.includes("brek") || summaryLower.includes("brake")) {
+      intervalKm = 25000;
+      intervalMonths = 18;
+      serviceType = "Brake System & Fluid Inspection";
+      recommendation = "Inspect front/rear brake pads thickness and DOT4 fluid";
+    } else if (summaryLower.includes("tayar") || summaryLower.includes("tyre") || summaryLower.includes("alignment")) {
+      intervalKm = 10000;
+      intervalMonths = 6;
+      serviceType = "Tyre Rotation & Alignment Check";
+      recommendation = "Rotate tyres and balance to prevent uneven tread wear";
+    }
+
+    const targetOdometer = lastOdo + intervalKm;
+    const targetDateObj = new Date(lastDate);
+    targetDateObj.setMonth(targetDateObj.getMonth() + intervalMonths);
+
+    const today = new Date();
+    const kmRemaining = targetOdometer - currentOdo;
+    const diffTime = targetDateObj.getTime() - today.getTime();
+    const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    let status: "healthy" | "due_soon" | "overdue" = "healthy";
+    if (kmRemaining <= 0 || daysRemaining <= 0) {
+      status = "overdue";
+    } else if (kmRemaining <= 1500 || daysRemaining <= 30) {
+      status = "due_soon";
+    }
+
+    return {
+      serviceType,
+      targetOdometer,
+      targetDate: targetDateObj.toLocaleDateString("en-MY", { month: "short", year: "numeric", day: "numeric" }),
+      kmRemaining,
+      daysRemaining,
+      status,
+      recommendation
+    };
+  };
+
+  // 2. MALAYSIAN COST PER KM & TCO ANALYTICS
+  const calculateTCO = (vehicle: Vehicle | null, receiptsList: Receipt[]): TCOAnalytics | null => {
+    if (!vehicle || receiptsList.length === 0) return null;
+
+    const totalSpent = receiptsList.reduce((sum, r) => sum + Number(r.total_amount || 0), 0);
+    const odometers = receiptsList.map(r => r.odometer).filter(o => o > 0);
+    const minOdo = odometers.length > 0 ? Math.min(...odometers) : 0;
+    const maxOdo = vehicle.current_odometer || (odometers.length > 0 ? Math.max(...odometers) : 1);
+    const totalDrivenKm = Math.max(1, maxOdo - (minOdo > 0 ? minOdo : 0));
+
+    const costPerKm = totalSpent / (maxOdo > 0 ? maxOdo : 1);
+    const avgBillPerVisit = totalSpent / receiptsList.length;
+
+    const oldestDate = new Date(receiptsList[receiptsList.length - 1].service_date);
+    const newestDate = new Date(receiptsList[0].service_date);
+    const monthsTracked = Math.max(1, (newestDate.getTime() - oldestDate.getTime()) / (1000 * 60 * 60 * 24 * 30.4));
+    const estimatedAnnualCost = (totalSpent / monthsTracked) * 12;
+
+    let serviceSum = 0;
+    let brakesSum = 0;
+    let tyresSum = 0;
+    let majorSum = 0;
+
+    receiptsList.forEach(r => {
+      const amt = Number(r.total_amount || 0);
+      const cat = r.category || "Service";
+      if (cat === "Brakes") brakesSum += amt;
+      else if (cat === "Tyres") tyresSum += amt;
+      else if (cat === "Major") majorSum += amt;
+      else serviceSum += amt;
+    });
+
+    const categoryBreakdown = [
+      {
+        category: "Engine & Fluids",
+        amount: serviceSum,
+        percentage: totalSpent > 0 ? Math.round((serviceSum / totalSpent) * 100) : 0,
+        color: "bg-emerald-500",
+        iconColor: "text-emerald-600"
+      },
+      {
+        category: "Braking System",
+        amount: brakesSum,
+        percentage: totalSpent > 0 ? Math.round((brakesSum / totalSpent) * 100) : 0,
+        color: "bg-amber-500",
+        iconColor: "text-amber-600"
+      },
+      {
+        category: "Tyres & Alignment",
+        amount: tyresSum,
+        percentage: totalSpent > 0 ? Math.round((tyresSum / totalSpent) * 100) : 0,
+        color: "bg-purple-500",
+        iconColor: "text-purple-600"
+      },
+      {
+        category: "Major & Transmission",
+        amount: majorSum,
+        percentage: totalSpent > 0 ? Math.round((majorSum / totalSpent) * 100) : 0,
+        color: "bg-blue-500",
+        iconColor: "text-blue-600"
+      },
+    ];
+
+    const MY_BENCHMARK_CPK = 0.045; // Malaysian national average RM 0.045 / km
+    const diff = ((costPerKm - MY_BENCHMARK_CPK) / MY_BENCHMARK_CPK) * 100;
+    
+    let benchmarkComparison: TCOAnalytics["benchmarkComparison"];
+    if (diff < -5) {
+      benchmarkComparison = {
+        status: "below",
+        percentageDiff: Math.abs(Math.round(diff)),
+        text: `${Math.abs(Math.round(diff))}% Below Malaysian Average (Cost-Efficient)`
+      };
+    } else if (diff > 15) {
+      benchmarkComparison = {
+        status: "above",
+        percentageDiff: Math.round(diff),
+        text: `${Math.round(diff)}% Above National Average (Heavy Maintenance)`
+      };
+    } else {
+      benchmarkComparison = {
+        status: "average",
+        percentageDiff: 0,
+        text: "Within Standard Malaysian Vehicle Maintenance Average"
+      };
+    }
+
+    return {
+      costPerKm,
+      totalDrivenKm,
+      avgBillPerVisit,
+      estimatedAnnualCost,
+      categoryBreakdown,
+      benchmarkComparison
+    };
+  };
+
+  // Helper to compress standard camera photos
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -229,6 +380,7 @@ export default function Dashboard() {
     });
   };
 
+  // Helper to convert PDF to Image directly on browser
   const convertPdfToImage = async (file: File): Promise<string> => {
     return new Promise(async (resolve, reject) => {
       try {
@@ -265,9 +417,7 @@ export default function Dashboard() {
     });
   };
 
-  // ==========================================
-  // 5. AI SCANNER HANDLER
-  // ==========================================
+  // Main AI Scanner
   const handleAIScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
@@ -289,6 +439,7 @@ export default function Dashboard() {
       });
 
       const data = await res.json();
+
       if (!res.ok) throw new Error(data.error || "Failed to scan file");
 
       if (data.invoice_no) setNewInvoiceNo(data.invoice_no);
@@ -322,9 +473,6 @@ export default function Dashboard() {
     }
   };
 
-  // ==========================================
-  // 6. FORM & CALCULATION LOGIC
-  // ==========================================
   const handleLineItemChange = (index: number, field: keyof InvoiceLineItem, value: any) => {
     const updated = [...lineItems];
     const item = updated[index];
@@ -401,6 +549,7 @@ export default function Dashboard() {
       );
       setReceipts(updatedList);
       
+      // Reset State
       setNewDate("");
       setNewOdometer("");
       setNewWorkshop("");
@@ -415,7 +564,13 @@ export default function Dashboard() {
     setSubmitting(false);
   };
 
-  // Helper to Parse String vs JSON item descriptions
+  const totalSpent = receipts.reduce((sum, r) => sum + Number(r.total_amount), 0);
+  const totalServices = receipts.length;
+  const lastServiceDate = receipts[0] 
+    ? new Date(receipts[0].service_date).toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" })
+    : "No records";
+  const lastWorkshop = receipts[0]?.workshop_name || "N/A";
+
   const getParsedItems = (itemsSummary: string): { isJson: boolean; data: any[] } => {
     if (!itemsSummary) return { isJson: false, data: [] };
     try {
@@ -426,182 +581,6 @@ export default function Dashboard() {
     } catch (e) {}
     return { isJson: false, data: itemsSummary.split(",").map(item => item.trim()) };
   };
-
-  // ----------------------------------------------------
-  // INTELLIGENT SERVICE FORECAST ENGINE
-  // ----------------------------------------------------
-  const calculateNextService = (
-    vehicle: Vehicle | null, 
-    receiptsList: Receipt[]
-  ): ServiceForecast | null => {
-    if (!vehicle || receiptsList.length === 0) return null;
-
-    const latestRecord = receiptsList.find(r => r.odometer > 0) || receiptsList[0];
-    if (!latestRecord) return null;
-
-    const currentOdo = vehicle.current_odometer || latestRecord.odometer || 0;
-    const lastOdo = latestRecord.odometer || currentOdo;
-    const lastDate = new Date(latestRecord.service_date);
-
-    const summaryLower = (latestRecord.items_summary || "").toLowerCase();
-    
-    let intervalKm = 10000;
-    let intervalMonths = 6;
-    let serviceType = "Next Engine Oil & Filter Service";
-    let recommendation = "Recommended: Fully Synthetic 0W-20 / 5W-30 + OEM Oil Filter";
-
-    if (summaryLower.includes("gearbox") || summaryLower.includes("atf") || summaryLower.includes("cvt") || summaryLower.includes("transmission")) {
-      intervalKm = 20000;
-      intervalMonths = 12;
-      serviceType = "Transmission / Gear Oil Interval";
-      recommendation = "Recommended: Genuine Manufacturer CVT / ATF Fluid";
-    } else if (summaryLower.includes("brek") || summaryLower.includes("brake")) {
-      intervalKm = 25000;
-      intervalMonths = 18;
-      serviceType = "Brake System & Fluid Inspection";
-      recommendation = "Inspect front/rear brake pads thickness and DOT4 brake fluid";
-    } else if (summaryLower.includes("tayar") || summaryLower.includes("tyre") || summaryLower.includes("alignment")) {
-      intervalKm = 10000;
-      intervalMonths = 6;
-      serviceType = "Tyre Rotation & Alignment Check";
-      recommendation = "Rotate tyres front-to-back and balance to prevent uneven wear";
-    }
-
-    const targetOdometer = lastOdo + intervalKm;
-    const targetDateObj = new Date(lastDate);
-    targetDateObj.setMonth(targetDateObj.getMonth() + intervalMonths);
-
-    const today = new Date();
-    const kmRemaining = targetOdometer - currentOdo;
-    const diffTime = targetDateObj.getTime() - today.getTime();
-    const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-    let status: "healthy" | "due_soon" | "overdue" = "healthy";
-    if (kmRemaining <= 0 || daysRemaining <= 0) {
-      status = "overdue";
-    } else if (kmRemaining <= 1500 || daysRemaining <= 30) {
-      status = "due_soon";
-    }
-
-    return {
-      serviceType,
-      targetOdometer,
-      targetDate: targetDateObj.toLocaleDateString("en-MY", { month: "short", year: "numeric", day: "numeric" }),
-      kmRemaining,
-      daysRemaining,
-      status,
-      recommendation
-    };
-  };
-
-  // ----------------------------------------------------
-  // MALAYSIAN TOTAL COST OF OWNERSHIP (TCO) ENGINE
-  // ----------------------------------------------------
-  const calculateTCO = (vehicle: Vehicle | null, receiptsList: Receipt[]): TCOAnalytics | null => {
-    if (!vehicle || receiptsList.length === 0) return null;
-
-    const totalSpent = receiptsList.reduce((sum, r) => sum + Number(r.total_amount || 0), 0);
-    
-    const odometers = receiptsList.map(r => r.odometer).filter(o => o > 0);
-    const minOdo = odometers.length > 0 ? Math.min(...odometers) : 0;
-    const maxOdo = vehicle.current_odometer || (odometers.length > 0 ? Math.max(...odometers) : 1);
-    const totalDrivenKm = Math.max(1, maxOdo - (minOdo > 0 ? minOdo : 0));
-
-    const costPerKm = totalSpent / (maxOdo > 0 ? maxOdo : 1);
-    const avgBillPerVisit = totalSpent / receiptsList.length;
-
-    const oldestDate = new Date(receiptsList[receiptsList.length - 1].service_date);
-    const newestDate = new Date(receiptsList[0].service_date);
-    const monthsTracked = Math.max(1, (newestDate.getTime() - oldestDate.getTime()) / (1000 * 60 * 60 * 24 * 30.4));
-    const estimatedAnnualCost = (totalSpent / monthsTracked) * 12;
-
-    let serviceSum = 0;
-    let brakesSum = 0;
-    let tyresSum = 0;
-    let majorSum = 0;
-
-    receiptsList.forEach(r => {
-      const amt = Number(r.total_amount || 0);
-      const cat = r.category || "Service";
-      if (cat === "Brakes") brakesSum += amt;
-      else if (cat === "Tyres") tyresSum += amt;
-      else if (cat === "Major") majorSum += amt;
-      else serviceSum += amt;
-    });
-
-    const categoryBreakdown = [
-      {
-        category: "Engine & Fluids",
-        amount: serviceSum,
-        percentage: totalSpent > 0 ? Math.round((serviceSum / totalSpent) * 100) : 0,
-        color: "bg-emerald-500",
-        iconColor: "text-emerald-600"
-      },
-      {
-        category: "Braking System",
-        amount: brakesSum,
-        percentage: totalSpent > 0 ? Math.round((brakesSum / totalSpent) * 100) : 0,
-        color: "bg-amber-500",
-        iconColor: "text-amber-600"
-      },
-      {
-        category: "Tyres & Alignment",
-        amount: tyresSum,
-        percentage: totalSpent > 0 ? Math.round((tyresSum / totalSpent) * 100) : 0,
-        color: "bg-purple-500",
-        iconColor: "text-purple-600"
-      },
-      {
-        category: "Major & Transmission",
-        amount: majorSum,
-        percentage: totalSpent > 0 ? Math.round((majorSum / totalSpent) * 100) : 0,
-        color: "bg-blue-500",
-        iconColor: "text-blue-600"
-      },
-    ];
-
-    const MY_BENCHMARK_CPK = 0.045;
-    const diff = ((costPerKm - MY_BENCHMARK_CPK) / MY_BENCHMARK_CPK) * 100;
-    
-    let benchmarkComparison: TCOAnalytics["benchmarkComparison"];
-    if (diff < -5) {
-      benchmarkComparison = {
-        status: "below",
-        percentageDiff: Math.abs(Math.round(diff)),
-        text: `${Math.abs(Math.round(diff))}% Below Malaysian Average (Cost-Efficient)`
-      };
-    } else if (diff > 15) {
-      benchmarkComparison = {
-        status: "above",
-        percentageDiff: Math.round(diff),
-        text: `${Math.round(diff)}% Above National Average (Heavy Maintenance)`
-      };
-    } else {
-      benchmarkComparison = {
-        status: "average",
-        percentageDiff: 0,
-        text: "Within Standard Malaysian Vehicle Maintenance Average"
-      };
-    }
-
-    return {
-      costPerKm,
-      totalDrivenKm,
-      avgBillPerVisit,
-      estimatedAnnualCost,
-      categoryBreakdown,
-      benchmarkComparison
-    };
-  };
-
-  // Run Calculations
-  const forecast = calculateNextService(activeVehicle, receipts);
-  const totalSpent = receipts.reduce((sum, r) => sum + Number(r.total_amount), 0);
-  const totalServices = receipts.length;
-  const lastServiceDate = receipts[0] 
-    ? new Date(receipts[0].service_date).toLocaleDateString("en-MY", { day: "numeric", month: "short", year: "numeric" })
-    : "No records";
-  const lastWorkshop = receipts[0]?.workshop_name || "N/A";
 
   if (loading) {
     return (
@@ -614,7 +593,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-slate-800 antialiased">
       
-      {/* 1. HIDDEN FILE & CAMERA INPUTS */}
+      {/* 1. HIDDEN SYSTEM CONTROLS */}
       <input 
         type="file"
         ref={fileInputRef}
@@ -711,11 +690,12 @@ export default function Dashboard() {
               </button>
             </div>
 
+            {/* Mileage Alert if Scheduled Service detected */}
             {isScheduledService && (!newOdometer || newOdometer === "0") && (
               <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-800">
                 <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
                 <div>
-                  <span className="font-bold">Scheduled Maintenance Detected:</span> Please provide the odometer reading if available. Recording mileage for oil and fluid services maximizes your vehicle's resale passport value.
+                  <span className="font-bold">Scheduled Maintenance Detected:</span> Please provide the odometer reading if available. Recording mileage for fluid services maximizes your vehicle's resale passport value.
                 </div>
               </div>
             )}
@@ -828,7 +808,7 @@ export default function Dashboard() {
                         <input 
                           type="text" 
                           required
-                          placeholder="Detailed part or labor description (e.g. Fully Synthetic 5W-40 Engine Oil)"
+                          placeholder="Detailed description (e.g. Fully Synthetic 5W-40 Engine Oil)"
                           value={item.description}
                           onChange={e => handleLineItemChange(index, "description", e.target.value)}
                           className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
@@ -948,52 +928,81 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 4.5. SERVICE FORECAST BANNER */}
-            {forecast && (
-              <div className={`mb-8 rounded-2xl border p-5 shadow-sm transition ${
-                forecast.status === "overdue" 
-                  ? "bg-red-50/80 border-red-200 text-red-900" 
-                  : forecast.status === "due_soon"
-                  ? "bg-amber-50/80 border-amber-200 text-amber-900"
-                  : "bg-emerald-50/60 border-emerald-200 text-slate-800"
-              }`}>
-                <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
-                  <div>
-                    <div className="flex items-center gap-2">
-                      <span className={`h-2.5 w-2.5 rounded-full ${
-                        forecast.status === "overdue" ? "bg-red-500 animate-ping" : forecast.status === "due_soon" ? "bg-amber-500" : "bg-emerald-500"
-                      }`} />
-                      <span className="text-xs font-bold uppercase tracking-wider">
-                        {forecast.status === "overdue" ? "Service Overdue" : forecast.status === "due_soon" ? "Service Due Soon" : "Service Forecast Healthy"}
-                      </span>
-                    </div>
-                    <h3 className="text-lg font-extrabold mt-1 text-slate-900">{forecast.serviceType}</h3>
-                    <p className="text-xs text-slate-600 mt-0.5">{forecast.recommendation}</p>
-                  </div>
+            {/* 5. NEXT SERVICE FORECAST CARD */}
+            {(() => {
+              const forecast = calculateNextService(activeVehicle, receipts);
+              if (!forecast) return null;
 
-                  <div className="flex items-center gap-4 border-t md:border-t-0 md:border-l border-slate-200/80 pt-3 md:pt-0 md:pl-6">
+              const isOverdue = forecast.status === "overdue";
+              const isDueSoon = forecast.status === "due_soon";
+
+              const cardBg = isOverdue 
+                ? "bg-gradient-to-r from-red-50 to-rose-50 border-red-200" 
+                : isDueSoon 
+                ? "bg-gradient-to-r from-amber-50 to-yellow-50 border-amber-200" 
+                : "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200";
+
+              const badgeBg = isOverdue 
+                ? "bg-red-600 text-white" 
+                : isDueSoon 
+                ? "bg-amber-600 text-white" 
+                : "bg-emerald-600 text-white";
+
+              return (
+                <div className={`mb-8 rounded-2xl border-2 p-6 shadow-sm ${cardBg} transition`}>
+                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
                     <div>
-                      <span className="text-[10px] font-bold uppercase text-slate-400 block">Due At</span>
-                      <span className="text-sm font-black text-slate-800">{forecast.targetOdometer.toLocaleString()} km</span>
-                      <span className="text-[11px] block text-slate-500">or {forecast.targetDate}</span>
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${badgeBg}`}>
+                          {isOverdue ? "Service Overdue" : isDueSoon ? "Service Due Soon" : "On Track"}
+                        </span>
+                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                          Smart Maintenance Predictor
+                        </span>
+                      </div>
+
+                      <h3 className="mt-2 text-xl font-black text-slate-900">
+                        {forecast.serviceType}
+                      </h3>
+
+                      <p className="mt-1 text-xs text-slate-600 font-medium">
+                        {forecast.recommendation}
+                      </p>
                     </div>
-                    <div className="text-right">
-                      <span className="text-[10px] font-bold uppercase text-slate-400 block">Remaining</span>
-                      <span className={`text-sm font-black ${
-                        forecast.kmRemaining <= 0 ? "text-red-600" : "text-slate-800"
-                      }`}>
-                        {forecast.kmRemaining <= 0 ? "0 km" : `${forecast.kmRemaining.toLocaleString()} km`}
-                      </span>
-                      <span className="text-[11px] block text-slate-500">
-                        {forecast.daysRemaining <= 0 ? "Due now" : `in ~${forecast.daysRemaining} days`}
-                      </span>
+
+                    <div className="flex items-center gap-4 bg-white/80 backdrop-blur-sm p-4 rounded-xl border border-slate-200/60 shadow-sm shrink-0">
+                      <div className="text-right">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due At Mileage</span>
+                        <span className="text-lg font-black text-slate-900">{forecast.targetOdometer.toLocaleString()} km</span>
+                        <span className="text-[11px] text-slate-500 block">
+                          {isOverdue ? (
+                            <span className="font-bold text-red-600">Past target mileage</span>
+                          ) : (
+                            <span>{forecast.kmRemaining.toLocaleString()} km remaining</span>
+                          )}
+                        </span>
+                      </div>
+
+                      <div className="h-10 w-[1px] bg-slate-200"></div>
+
+                      <div>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due By Date</span>
+                        <span className="text-lg font-black text-slate-900">{forecast.targetDate}</span>
+                        <span className="text-[11px] text-slate-500 block">
+                          {isOverdue ? (
+                            <span className="font-bold text-red-600">Overdue by {Math.abs(forecast.daysRemaining)} days</span>
+                          ) : (
+                            <span>In approx. {forecast.daysRemaining} days</span>
+                          )}
+                        </span>
+                      </div>
                     </div>
                   </div>
                 </div>
-              </div>
-            )}
+              );
+            })()}
 
-            {/* 5. STAT SUMMARY CARDS */}
+            {/* 6. STAT SUMMARY CARDS */}
             <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-4">
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Current Odometer</span>
@@ -1024,7 +1033,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 6. NAVIGATION TABS */}
+            {/* 7. NAVIGATION TABS */}
             <div className="mb-6 border-b border-slate-200">
               <nav className="flex gap-6">
                 <button 
@@ -1041,13 +1050,14 @@ export default function Dashboard() {
                     activeTab === "analytics" ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-400 hover:text-slate-600"
                   }`}
                 >
-                  Analytics
+                  Malaysian TCO & Cost-per-KM Analytics
                 </button>
               </nav>
             </div>
 
-            {/* 7. TIMELINE VS ANALYTICS TABS */}
+            {/* 8. MAIN CONTENT TABS */}
             {activeTab === "timeline" ? (
+              /* TAB 1: TIMELINE */
               <div className="space-y-4">
                 <div className="flex items-center justify-between text-xs text-slate-400 font-semibold mb-2">
                   <span>{receipts.length} verified records • sorted by newest service date</span>
@@ -1086,7 +1096,6 @@ export default function Dashboard() {
                       key={receipt.id} 
                       className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
                     >
-                      {/* Top Bar Header */}
                       <div 
                         onClick={() => toggleExpand(receipt.id)}
                         className="flex cursor-pointer items-center justify-between p-5 select-none"
@@ -1219,9 +1228,7 @@ export default function Dashboard() {
                 })}
               </div>
             ) : (
-              /* ======================================================== */
-              /* MALAYSIAN COST-PER-KM & TCO ANALYTICS TAB               */
-              /* ======================================================== */
+              /* TAB 2: MALAYSIAN TCO & COST-PER-KM ANALYTICS */
               (() => {
                 const tco = calculateTCO(activeVehicle, receipts);
                 if (!tco) {
@@ -1288,7 +1295,7 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    {/* 2. EXPENSE CATEGORY DISTRIBUTION (TCO BAR & BREAKDOWN) */}
+                    {/* 2. EXPENSE CATEGORY DISTRIBUTION */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                       <div className="flex items-center justify-between mb-4">
                         <h4 className="font-bold text-slate-800 text-sm md:text-base">
