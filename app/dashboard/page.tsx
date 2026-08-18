@@ -57,6 +57,16 @@ interface Receipt {
   category?: string;
 }
 
+interface ServiceForecast {
+  serviceType: string;
+  targetOdometer: number;
+  targetDate: string;
+  kmRemaining: number;
+  daysRemaining: number;
+  status: "healthy" | "due_soon" | "overdue";
+  recommendation: string;
+}
+
 export default function Dashboard() {
   const supabase = createClient();
   const router = useRouter();
@@ -312,6 +322,71 @@ export default function Dashboard() {
 
   const calculateTotalAmount = () => {
     return lineItems.reduce((sum, item) => sum + item.total, 0);
+  };
+  const calculateNextService = (
+    vehicle: Vehicle | null, 
+    receiptsList: Receipt[]
+  ): ServiceForecast | null => {
+    if (!vehicle || receiptsList.length === 0) return null;
+  
+    // 1. Find the latest service record with a valid odometer
+    const latestRecord = receiptsList.find(r => r.odometer > 0) || receiptsList[0];
+    if (!latestRecord) return null;
+  
+    const currentOdo = vehicle.current_odometer || latestRecord.odometer || 0;
+    const lastOdo = latestRecord.odometer || currentOdo;
+    const lastDate = new Date(latestRecord.service_date);
+  
+    const summaryLower = (latestRecord.items_summary || "").toLowerCase();
+    
+    let intervalKm = 10000; // default 10k km
+    let intervalMonths = 6; // default 6 months
+    let serviceType = "Next Engine Oil & Filter Service";
+    let recommendation = "Recommended: Fully Synthetic 0W-20 / 5W-30 + OEM Oil Filter";
+  
+    // Intelligent interval adjustments based on what was done
+    if (summaryLower.includes("gearbox") || summaryLower.includes("atf") || summaryLower.includes("cvt") || summaryLower.includes("transmission")) {
+      intervalKm = 20000;
+      intervalMonths = 12;
+      serviceType = "Transmission / Gear Oil Interval";
+      recommendation = "Recommended: Genuine Manufacturer CVT / ATF Fluid";
+    } else if (summaryLower.includes("brek") || summaryLower.includes("brake")) {
+      intervalKm = 25000;
+      intervalMonths = 18;
+      serviceType = "Brake System & Fluid Inspection";
+      recommendation = "Inspect front/rear brake pads thickness and DOT4 brake fluid";
+    } else if (summaryLower.includes("tayar") || summaryLower.includes("tyre") || summaryLower.includes("alignment")) {
+      intervalKm = 10000;
+      intervalMonths = 6;
+      serviceType = "Tyre Rotation & Alignment Check";
+      recommendation = "Rotate tyres front-to-back and balance to prevent uneven wear";
+    }
+  
+    const targetOdometer = lastOdo + intervalKm;
+    const targetDateObj = new Date(lastDate);
+    targetDateObj.setMonth(targetDateObj.getMonth() + intervalMonths);
+  
+    const today = new Date();
+    const kmRemaining = targetOdometer - currentOdo;
+    const diffTime = targetDateObj.getTime() - today.getTime();
+    const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+  
+    let status: "healthy" | "due_soon" | "overdue" = "healthy";
+    if (kmRemaining <= 0 || daysRemaining <= 0) {
+      status = "overdue";
+    } else if (kmRemaining <= 1500 || daysRemaining <= 30) {
+      status = "due_soon";
+    }
+  
+    return {
+      serviceType,
+      targetOdometer,
+      targetDate: targetDateObj.toLocaleDateString("en-MY", { month: "short", year: "numeric", day: "numeric" }),
+      kmRemaining,
+      daysRemaining,
+      status,
+      recommendation
+    };
   };
 
   const handleAddReceipt = async (e: React.FormEvent) => {
@@ -739,6 +814,81 @@ export default function Dashboard() {
                 </div>
               </div>
             </div>
+
+            {/* NEXT SERVICE FORECAST CARD */}
+{(() => {
+  const forecast = calculateNextService(activeVehicle, receipts);
+  if (!forecast) return null;
+
+  const isOverdue = forecast.status === "overdue";
+  const isDueSoon = forecast.status === "due_soon";
+
+  const cardBg = isOverdue 
+    ? "bg-gradient-to-r from-red-50 to-rose-50 border-red-200" 
+    : isDueSoon 
+    ? "bg-gradient-to-r from-amber-50 to-yellow-50 border-amber-200" 
+    : "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200";
+
+  const badgeBg = isOverdue 
+    ? "bg-red-600 text-white" 
+    : isDueSoon 
+    ? "bg-amber-600 text-white" 
+    : "bg-emerald-600 text-white";
+
+  return (
+    <div className={`mb-8 rounded-2xl border-2 p-6 shadow-sm ${cardBg} transition`}>
+      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+        <div>
+          <div className="flex items-center gap-2">
+            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${badgeBg}`}>
+              {isOverdue ? "Service Overdue" : isDueSoon ? "Service Due Soon" : "On Track"}
+            </span>
+            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+              Smart Maintenance Predictor
+            </span>
+          </div>
+
+          <h3 className="mt-2 text-xl font-black text-slate-900">
+            {forecast.serviceType}
+          </h3>
+
+          <p className="mt-1 text-xs text-slate-600 font-medium">
+            {forecast.recommendation}
+          </p>
+        </div>
+
+        {/* TARGET MILEAGE & DATE BOX */}
+        <div className="flex items-center gap-4 bg-white/80 backdrop-blur-sm p-4 rounded-xl border border-slate-200/60 shadow-sm shrink-0">
+          <div className="text-right">
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due At Mileage</span>
+            <span className="text-lg font-black text-slate-900">{forecast.targetOdometer.toLocaleString()} km</span>
+            <span className="text-[11px] text-slate-500 block">
+              {isOverdue ? (
+                <span className="font-bold text-red-600">Past target mileage</span>
+              ) : (
+                <span>{forecast.kmRemaining.toLocaleString()} km remaining</span>
+              )}
+            </span>
+          </div>
+
+          <div className="h-10 w-[1px] bg-slate-200"></div>
+
+          <div>
+            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due By Date</span>
+            <span className="text-lg font-black text-slate-900">{forecast.targetDate}</span>
+            <span className="text-[11px] text-slate-500 block">
+              {isOverdue ? (
+                <span className="font-bold text-red-600">Overdue by {Math.abs(forecast.daysRemaining)} days</span>
+              ) : (
+                <span>In approx. {forecast.daysRemaining} days</span>
+              )}
+            </span>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+})()}
 
             {/* 5. STAT SUMMARY CARDS */}
             <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-4">
