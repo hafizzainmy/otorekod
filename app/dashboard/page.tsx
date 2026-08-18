@@ -67,6 +67,25 @@ interface ServiceForecast {
   recommendation: string;
 }
 
+interface TCOAnalytics {
+  costPerKm: number;
+  totalDrivenKm: number;
+  avgBillPerVisit: number;
+  estimatedAnnualCost: number;
+  categoryBreakdown: {
+    category: string;
+    amount: number;
+    percentage: number;
+    color: string;
+    iconColor: string;
+  }[];
+  benchmarkComparison: {
+    status: "below" | "average" | "above";
+    percentageDiff: number;
+    text: string;
+  };
+}
+
 export default function Dashboard() {
   const supabase = createClient();
   const router = useRouter();
@@ -123,7 +142,7 @@ export default function Dashboard() {
           .from("receipts")
           .select("*")
           .eq("vehicle_id", dbVehicles[0].id)
-          .order("service_date", { ascending: false }); // ALWAYS latest first
+          .order("service_date", { ascending: false });
 
         if (dbReceipts) {
           const categorized = dbReceipts.map((r) => {
@@ -163,7 +182,169 @@ export default function Dashboard() {
     setExpandedReceipts(prev => ({ ...prev, [id]: !prev[id] }));
   };
 
-  // Image Compressor
+  // 1. SMART NEXT SERVICE DUE PREDICTOR
+  const calculateNextService = (
+    vehicle: Vehicle | null, 
+    receiptsList: Receipt[]
+  ): ServiceForecast | null => {
+    if (!vehicle || receiptsList.length === 0) return null;
+
+    const latestRecord = receiptsList.find(r => r.odometer > 0) || receiptsList[0];
+    if (!latestRecord) return null;
+
+    const currentOdo = vehicle.current_odometer || latestRecord.odometer || 0;
+    const lastOdo = latestRecord.odometer || currentOdo;
+    const lastDate = new Date(latestRecord.service_date);
+
+    const summaryLower = (latestRecord.items_summary || "").toLowerCase();
+    
+    let intervalKm = 10000;
+    let intervalMonths = 6;
+    let serviceType = "Next Engine Oil & Filter Service";
+    let recommendation = "Recommended: Fully Synthetic 0W-20 / 5W-30 + OEM Oil Filter";
+
+    if (summaryLower.includes("gearbox") || summaryLower.includes("atf") || summaryLower.includes("cvt") || summaryLower.includes("transmission")) {
+      intervalKm = 20000;
+      intervalMonths = 12;
+      serviceType = "Transmission / Gear Oil Interval";
+      recommendation = "Recommended: Genuine Manufacturer CVT / ATF Fluid";
+    } else if (summaryLower.includes("brek") || summaryLower.includes("brake")) {
+      intervalKm = 25000;
+      intervalMonths = 18;
+      serviceType = "Brake System & Fluid Inspection";
+      recommendation = "Inspect front/rear brake pads thickness and DOT4 fluid";
+    } else if (summaryLower.includes("tayar") || summaryLower.includes("tyre") || summaryLower.includes("alignment")) {
+      intervalKm = 10000;
+      intervalMonths = 6;
+      serviceType = "Tyre Rotation & Alignment Check";
+      recommendation = "Rotate tyres and balance to prevent uneven tread wear";
+    }
+
+    const targetOdometer = lastOdo + intervalKm;
+    const targetDateObj = new Date(lastDate);
+    targetDateObj.setMonth(targetDateObj.getMonth() + intervalMonths);
+
+    const today = new Date();
+    const kmRemaining = targetOdometer - currentOdo;
+    const diffTime = targetDateObj.getTime() - today.getTime();
+    const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
+
+    let status: "healthy" | "due_soon" | "overdue" = "healthy";
+    if (kmRemaining <= 0 || daysRemaining <= 0) {
+      status = "overdue";
+    } else if (kmRemaining <= 1500 || daysRemaining <= 30) {
+      status = "due_soon";
+    }
+
+    return {
+      serviceType,
+      targetOdometer,
+      targetDate: targetDateObj.toLocaleDateString("en-MY", { month: "short", year: "numeric", day: "numeric" }),
+      kmRemaining,
+      daysRemaining,
+      status,
+      recommendation
+    };
+  };
+
+  // 2. MALAYSIAN COST PER KM & TCO ANALYTICS
+  const calculateTCO = (vehicle: Vehicle | null, receiptsList: Receipt[]): TCOAnalytics | null => {
+    if (!vehicle || receiptsList.length === 0) return null;
+
+    const totalSpent = receiptsList.reduce((sum, r) => sum + Number(r.total_amount || 0), 0);
+    const odometers = receiptsList.map(r => r.odometer).filter(o => o > 0);
+    const minOdo = odometers.length > 0 ? Math.min(...odometers) : 0;
+    const maxOdo = vehicle.current_odometer || (odometers.length > 0 ? Math.max(...odometers) : 1);
+    const totalDrivenKm = Math.max(1, maxOdo - (minOdo > 0 ? minOdo : 0));
+
+    const costPerKm = totalSpent / (maxOdo > 0 ? maxOdo : 1);
+    const avgBillPerVisit = totalSpent / receiptsList.length;
+
+    const oldestDate = new Date(receiptsList[receiptsList.length - 1].service_date);
+    const newestDate = new Date(receiptsList[0].service_date);
+    const monthsTracked = Math.max(1, (newestDate.getTime() - oldestDate.getTime()) / (1000 * 60 * 60 * 24 * 30.4));
+    const estimatedAnnualCost = (totalSpent / monthsTracked) * 12;
+
+    let serviceSum = 0;
+    let brakesSum = 0;
+    let tyresSum = 0;
+    let majorSum = 0;
+
+    receiptsList.forEach(r => {
+      const amt = Number(r.total_amount || 0);
+      const cat = r.category || "Service";
+      if (cat === "Brakes") brakesSum += amt;
+      else if (cat === "Tyres") tyresSum += amt;
+      else if (cat === "Major") majorSum += amt;
+      else serviceSum += amt;
+    });
+
+    const categoryBreakdown = [
+      {
+        category: "Engine & Fluids",
+        amount: serviceSum,
+        percentage: totalSpent > 0 ? Math.round((serviceSum / totalSpent) * 100) : 0,
+        color: "bg-emerald-500",
+        iconColor: "text-emerald-600"
+      },
+      {
+        category: "Braking System",
+        amount: brakesSum,
+        percentage: totalSpent > 0 ? Math.round((brakesSum / totalSpent) * 100) : 0,
+        color: "bg-amber-500",
+        iconColor: "text-amber-600"
+      },
+      {
+        category: "Tyres & Alignment",
+        amount: tyresSum,
+        percentage: totalSpent > 0 ? Math.round((tyresSum / totalSpent) * 100) : 0,
+        color: "bg-purple-500",
+        iconColor: "text-purple-600"
+      },
+      {
+        category: "Major & Transmission",
+        amount: majorSum,
+        percentage: totalSpent > 0 ? Math.round((majorSum / totalSpent) * 100) : 0,
+        color: "bg-blue-500",
+        iconColor: "text-blue-600"
+      },
+    ];
+
+    const MY_BENCHMARK_CPK = 0.045; // Malaysian national average RM 0.045 / km
+    const diff = ((costPerKm - MY_BENCHMARK_CPK) / MY_BENCHMARK_CPK) * 100;
+    
+    let benchmarkComparison: TCOAnalytics["benchmarkComparison"];
+    if (diff < -5) {
+      benchmarkComparison = {
+        status: "below",
+        percentageDiff: Math.abs(Math.round(diff)),
+        text: `${Math.abs(Math.round(diff))}% Below Malaysian Average (Cost-Efficient)`
+      };
+    } else if (diff > 15) {
+      benchmarkComparison = {
+        status: "above",
+        percentageDiff: Math.round(diff),
+        text: `${Math.round(diff)}% Above National Average (Heavy Maintenance)`
+      };
+    } else {
+      benchmarkComparison = {
+        status: "average",
+        percentageDiff: 0,
+        text: "Within Standard Malaysian Vehicle Maintenance Average"
+      };
+    }
+
+    return {
+      costPerKm,
+      totalDrivenKm,
+      avgBillPerVisit,
+      estimatedAnnualCost,
+      categoryBreakdown,
+      benchmarkComparison
+    };
+  };
+
+  // Helper to compress standard camera photos
   const compressImage = (file: File): Promise<string> => {
     return new Promise((resolve, reject) => {
       const img = new Image();
@@ -199,7 +380,7 @@ export default function Dashboard() {
     });
   };
 
-  // PDF to Image Converter
+  // Helper to convert PDF to Image directly on browser
   const convertPdfToImage = async (file: File): Promise<string> => {
     return new Promise(async (resolve, reject) => {
       try {
@@ -261,7 +442,6 @@ export default function Dashboard() {
 
       if (!res.ok) throw new Error(data.error || "Failed to scan file");
 
-      // Populate extracted authenticity metadata
       if (data.invoice_no) setNewInvoiceNo(data.invoice_no);
       if (data.service_date) setNewDate(data.service_date);
       if (data.odometer) setNewOdometer(String(data.odometer));
@@ -272,7 +452,6 @@ export default function Dashboard() {
       if (data.workshop_email) setNewWorkshopEmail(data.workshop_email);
       if (data.is_scheduled_service !== undefined) setIsScheduledService(data.is_scheduled_service);
       
-      // Populate full item descriptions
       if (data.line_items && data.line_items.length > 0) {
         setLineItems(data.line_items.map((item: any) => ({
           description: item.description || "",
@@ -323,71 +502,6 @@ export default function Dashboard() {
   const calculateTotalAmount = () => {
     return lineItems.reduce((sum, item) => sum + item.total, 0);
   };
-  const calculateNextService = (
-    vehicle: Vehicle | null, 
-    receiptsList: Receipt[]
-  ): ServiceForecast | null => {
-    if (!vehicle || receiptsList.length === 0) return null;
-  
-    // 1. Find the latest service record with a valid odometer
-    const latestRecord = receiptsList.find(r => r.odometer > 0) || receiptsList[0];
-    if (!latestRecord) return null;
-  
-    const currentOdo = vehicle.current_odometer || latestRecord.odometer || 0;
-    const lastOdo = latestRecord.odometer || currentOdo;
-    const lastDate = new Date(latestRecord.service_date);
-  
-    const summaryLower = (latestRecord.items_summary || "").toLowerCase();
-    
-    let intervalKm = 10000; // default 10k km
-    let intervalMonths = 6; // default 6 months
-    let serviceType = "Next Engine Oil & Filter Service";
-    let recommendation = "Recommended: Fully Synthetic 0W-20 / 5W-30 + OEM Oil Filter";
-  
-    // Intelligent interval adjustments based on what was done
-    if (summaryLower.includes("gearbox") || summaryLower.includes("atf") || summaryLower.includes("cvt") || summaryLower.includes("transmission")) {
-      intervalKm = 20000;
-      intervalMonths = 12;
-      serviceType = "Transmission / Gear Oil Interval";
-      recommendation = "Recommended: Genuine Manufacturer CVT / ATF Fluid";
-    } else if (summaryLower.includes("brek") || summaryLower.includes("brake")) {
-      intervalKm = 25000;
-      intervalMonths = 18;
-      serviceType = "Brake System & Fluid Inspection";
-      recommendation = "Inspect front/rear brake pads thickness and DOT4 brake fluid";
-    } else if (summaryLower.includes("tayar") || summaryLower.includes("tyre") || summaryLower.includes("alignment")) {
-      intervalKm = 10000;
-      intervalMonths = 6;
-      serviceType = "Tyre Rotation & Alignment Check";
-      recommendation = "Rotate tyres front-to-back and balance to prevent uneven wear";
-    }
-  
-    const targetOdometer = lastOdo + intervalKm;
-    const targetDateObj = new Date(lastDate);
-    targetDateObj.setMonth(targetDateObj.getMonth() + intervalMonths);
-  
-    const today = new Date();
-    const kmRemaining = targetOdometer - currentOdo;
-    const diffTime = targetDateObj.getTime() - today.getTime();
-    const daysRemaining = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-  
-    let status: "healthy" | "due_soon" | "overdue" = "healthy";
-    if (kmRemaining <= 0 || daysRemaining <= 0) {
-      status = "overdue";
-    } else if (kmRemaining <= 1500 || daysRemaining <= 30) {
-      status = "due_soon";
-    }
-  
-    return {
-      serviceType,
-      targetOdometer,
-      targetDate: targetDateObj.toLocaleDateString("en-MY", { month: "short", year: "numeric", day: "numeric" }),
-      kmRemaining,
-      daysRemaining,
-      status,
-      recommendation
-    };
-  };
 
   const handleAddReceipt = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -430,7 +544,6 @@ export default function Dashboard() {
         setActiveVehicle({ ...activeVehicle, current_odometer: parsedOdo });
       }
 
-      // Re-sort list by date descending immediately
       const updatedList = [{ ...newRecord, category: "Service" }, ...receipts].sort(
         (a, b) => new Date(b.service_date).getTime() - new Date(a.service_date).getTime()
       );
@@ -480,7 +593,7 @@ export default function Dashboard() {
   return (
     <div className="min-h-screen bg-[#f0f4f8] text-slate-800 antialiased">
       
-      {/* 1. HIDDEN SYSTEM INPUTS */}
+      {/* 1. HIDDEN SYSTEM CONTROLS */}
       <input 
         type="file"
         ref={fileInputRef}
@@ -577,12 +690,12 @@ export default function Dashboard() {
               </button>
             </div>
 
-            {/* Mileage Encouragement Banner if Scheduled Service detected */}
+            {/* Mileage Alert if Scheduled Service detected */}
             {isScheduledService && (!newOdometer || newOdometer === "0") && (
               <div className="mb-5 flex items-start gap-2.5 rounded-xl border border-amber-200 bg-amber-50/80 p-3 text-xs text-amber-800">
                 <AlertCircle size={16} className="text-amber-600 shrink-0 mt-0.5" />
                 <div>
-                  <span className="font-bold">Scheduled Maintenance Detected:</span> Please provide the odometer reading if available. Recording mileage for oil and fluid services maximizes your vehicle's resale passport value.
+                  <span className="font-bold">Scheduled Maintenance Detected:</span> Please provide the odometer reading if available. Recording mileage for fluid services maximizes your vehicle's resale passport value.
                 </div>
               </div>
             )}
@@ -681,7 +794,7 @@ export default function Dashboard() {
                 </div>
               </div>
 
-              {/* DYNAMIC LINE ITEMS (EXPANDED DESCRIPTIONS) */}
+              {/* DYNAMIC LINE ITEMS */}
               <div className="border-t border-slate-100 pt-4">
                 <div className="flex items-center justify-between mb-3">
                   <h4 className="text-xs font-bold text-slate-600 uppercase tracking-wider">Itemized Parts & Labor Summary</h4>
@@ -695,7 +808,7 @@ export default function Dashboard() {
                         <input 
                           type="text" 
                           required
-                          placeholder="Detailed part or labor description (e.g. Fully Synthetic 5W-40 Engine Oil)"
+                          placeholder="Detailed description (e.g. Fully Synthetic 5W-40 Engine Oil)"
                           value={item.description}
                           onChange={e => handleLineItemChange(index, "description", e.target.value)}
                           className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
@@ -815,82 +928,81 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* NEXT SERVICE FORECAST CARD */}
-{(() => {
-  const forecast = calculateNextService(activeVehicle, receipts);
-  if (!forecast) return null;
+            {/* 5. NEXT SERVICE FORECAST CARD */}
+            {(() => {
+              const forecast = calculateNextService(activeVehicle, receipts);
+              if (!forecast) return null;
 
-  const isOverdue = forecast.status === "overdue";
-  const isDueSoon = forecast.status === "due_soon";
+              const isOverdue = forecast.status === "overdue";
+              const isDueSoon = forecast.status === "due_soon";
 
-  const cardBg = isOverdue 
-    ? "bg-gradient-to-r from-red-50 to-rose-50 border-red-200" 
-    : isDueSoon 
-    ? "bg-gradient-to-r from-amber-50 to-yellow-50 border-amber-200" 
-    : "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200";
+              const cardBg = isOverdue 
+                ? "bg-gradient-to-r from-red-50 to-rose-50 border-red-200" 
+                : isDueSoon 
+                ? "bg-gradient-to-r from-amber-50 to-yellow-50 border-amber-200" 
+                : "bg-gradient-to-r from-emerald-50 to-teal-50 border-emerald-200";
 
-  const badgeBg = isOverdue 
-    ? "bg-red-600 text-white" 
-    : isDueSoon 
-    ? "bg-amber-600 text-white" 
-    : "bg-emerald-600 text-white";
+              const badgeBg = isOverdue 
+                ? "bg-red-600 text-white" 
+                : isDueSoon 
+                ? "bg-amber-600 text-white" 
+                : "bg-emerald-600 text-white";
 
-  return (
-    <div className={`mb-8 rounded-2xl border-2 p-6 shadow-sm ${cardBg} transition`}>
-      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
-        <div>
-          <div className="flex items-center gap-2">
-            <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${badgeBg}`}>
-              {isOverdue ? "Service Overdue" : isDueSoon ? "Service Due Soon" : "On Track"}
-            </span>
-            <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
-              Smart Maintenance Predictor
-            </span>
-          </div>
+              return (
+                <div className={`mb-8 rounded-2xl border-2 p-6 shadow-sm ${cardBg} transition`}>
+                  <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-4">
+                    <div>
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2.5 py-0.5 rounded-full text-[10px] font-black uppercase tracking-wider ${badgeBg}`}>
+                          {isOverdue ? "Service Overdue" : isDueSoon ? "Service Due Soon" : "On Track"}
+                        </span>
+                        <span className="text-xs font-bold text-slate-500 uppercase tracking-wider">
+                          Smart Maintenance Predictor
+                        </span>
+                      </div>
 
-          <h3 className="mt-2 text-xl font-black text-slate-900">
-            {forecast.serviceType}
-          </h3>
+                      <h3 className="mt-2 text-xl font-black text-slate-900">
+                        {forecast.serviceType}
+                      </h3>
 
-          <p className="mt-1 text-xs text-slate-600 font-medium">
-            {forecast.recommendation}
-          </p>
-        </div>
+                      <p className="mt-1 text-xs text-slate-600 font-medium">
+                        {forecast.recommendation}
+                      </p>
+                    </div>
 
-        {/* TARGET MILEAGE & DATE BOX */}
-        <div className="flex items-center gap-4 bg-white/80 backdrop-blur-sm p-4 rounded-xl border border-slate-200/60 shadow-sm shrink-0">
-          <div className="text-right">
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due At Mileage</span>
-            <span className="text-lg font-black text-slate-900">{forecast.targetOdometer.toLocaleString()} km</span>
-            <span className="text-[11px] text-slate-500 block">
-              {isOverdue ? (
-                <span className="font-bold text-red-600">Past target mileage</span>
-              ) : (
-                <span>{forecast.kmRemaining.toLocaleString()} km remaining</span>
-              )}
-            </span>
-          </div>
+                    <div className="flex items-center gap-4 bg-white/80 backdrop-blur-sm p-4 rounded-xl border border-slate-200/60 shadow-sm shrink-0">
+                      <div className="text-right">
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due At Mileage</span>
+                        <span className="text-lg font-black text-slate-900">{forecast.targetOdometer.toLocaleString()} km</span>
+                        <span className="text-[11px] text-slate-500 block">
+                          {isOverdue ? (
+                            <span className="font-bold text-red-600">Past target mileage</span>
+                          ) : (
+                            <span>{forecast.kmRemaining.toLocaleString()} km remaining</span>
+                          )}
+                        </span>
+                      </div>
 
-          <div className="h-10 w-[1px] bg-slate-200"></div>
+                      <div className="h-10 w-[1px] bg-slate-200"></div>
 
-          <div>
-            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due By Date</span>
-            <span className="text-lg font-black text-slate-900">{forecast.targetDate}</span>
-            <span className="text-[11px] text-slate-500 block">
-              {isOverdue ? (
-                <span className="font-bold text-red-600">Overdue by {Math.abs(forecast.daysRemaining)} days</span>
-              ) : (
-                <span>In approx. {forecast.daysRemaining} days</span>
-              )}
-            </span>
-          </div>
-        </div>
-      </div>
-    </div>
-  );
-})()}
+                      <div>
+                        <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Due By Date</span>
+                        <span className="text-lg font-black text-slate-900">{forecast.targetDate}</span>
+                        <span className="text-[11px] text-slate-500 block">
+                          {isOverdue ? (
+                            <span className="font-bold text-red-600">Overdue by {Math.abs(forecast.daysRemaining)} days</span>
+                          ) : (
+                            <span>In approx. {forecast.daysRemaining} days</span>
+                          )}
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              );
+            })()}
 
-            {/* 5. STAT SUMMARY CARDS */}
+            {/* 6. STAT SUMMARY CARDS */}
             <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-4">
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Current Odometer</span>
@@ -921,7 +1033,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 6. NAVIGATION TABS */}
+            {/* 7. NAVIGATION TABS */}
             <div className="mb-6 border-b border-slate-200">
               <nav className="flex gap-6">
                 <button 
@@ -938,13 +1050,14 @@ export default function Dashboard() {
                     activeTab === "analytics" ? "border-emerald-600 text-emerald-700" : "border-transparent text-slate-400 hover:text-slate-600"
                   }`}
                 >
-                  Analytics
+                  Malaysian TCO & Cost-per-KM Analytics
                 </button>
               </nav>
             </div>
 
-            {/* 7. TIMELINE BODY (LATEST ON TOP) */}
+            {/* 8. MAIN CONTENT TABS */}
             {activeTab === "timeline" ? (
+              /* TAB 1: TIMELINE */
               <div className="space-y-4">
                 <div className="flex items-center justify-between text-xs text-slate-400 font-semibold mb-2">
                   <span>{receipts.length} verified records • sorted by newest service date</span>
@@ -983,7 +1096,6 @@ export default function Dashboard() {
                       key={receipt.id} 
                       className="group overflow-hidden rounded-xl border border-slate-200 bg-white shadow-sm transition hover:shadow-md"
                     >
-                      {/* Top Bar Header */}
                       <div 
                         onClick={() => toggleExpand(receipt.id)}
                         className="flex cursor-pointer items-center justify-between p-5 select-none"
@@ -1116,11 +1228,144 @@ export default function Dashboard() {
                 })}
               </div>
             ) : (
-              <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-slate-500 shadow-sm">
-                <TrendingUp size={36} className="mx-auto text-slate-300 mb-3" />
-                <h4 className="font-bold text-slate-800 mb-1">Maintenance Expense Analytics</h4>
-                <p className="text-sm text-slate-400 max-w-md mx-auto">Track cost benchmarks and service intervals across your historical data.</p>
-              </div>
+              /* TAB 2: MALAYSIAN TCO & COST-PER-KM ANALYTICS */
+              (() => {
+                const tco = calculateTCO(activeVehicle, receipts);
+                if (!tco) {
+                  return (
+                    <div className="rounded-xl border border-slate-200 bg-white p-8 text-center text-slate-500 shadow-sm">
+                      <TrendingUp size={36} className="mx-auto text-slate-300 mb-3" />
+                      <h4 className="font-bold text-slate-800 mb-1">Not Enough Data for Analytics</h4>
+                      <p className="text-sm text-slate-400 max-w-md mx-auto">Upload at least one verified workshop invoice to calculate your vehicle's cost per kilometer.</p>
+                    </div>
+                  );
+                }
+
+                const isBelowAvg = tco.benchmarkComparison.status === "below";
+                const isAboveAvg = tco.benchmarkComparison.status === "above";
+
+                return (
+                  <div className="space-y-6">
+                    
+                    {/* 1. TOP EFFICIENCY & COST-PER-KM HERO CARD */}
+                    <div className="rounded-2xl border-2 border-slate-200/80 bg-white p-6 shadow-sm">
+                      <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
+                        <div>
+                          <span className="text-xs font-bold uppercase tracking-widest text-slate-400">
+                            Running Efficiency • Malaysian TCO Benchmark
+                          </span>
+                          <div className="mt-2 flex items-baseline gap-2">
+                            <span className="text-4xl font-black text-slate-900">
+                              RM {tco.costPerKm.toFixed(3)}
+                            </span>
+                            <span className="text-sm font-bold text-slate-500">/ kilometer</span>
+                          </div>
+                          
+                          <div className="mt-3 flex items-center gap-2">
+                            <span className={`inline-flex items-center gap-1 rounded-full px-3 py-1 text-xs font-bold ${
+                              isBelowAvg 
+                                ? "bg-emerald-100 text-emerald-800" 
+                                : isAboveAvg 
+                                ? "bg-rose-100 text-rose-800" 
+                                : "bg-slate-100 text-slate-700"
+                            }`}>
+                              {tco.benchmarkComparison.text}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* QUICK BENCHMARK STATS */}
+                        <div className="grid grid-cols-2 gap-3 md:w-80">
+                          <div className="rounded-xl border border-slate-100 bg-slate-50 p-3.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Avg Bill / Visit</span>
+                            <span className="text-base font-extrabold text-slate-800 mt-1 block">
+                              RM {tco.avgBillPerVisit.toFixed(2)}
+                            </span>
+                            <span className="text-[10px] text-slate-400">per invoice</span>
+                          </div>
+
+                          <div className="rounded-xl border border-slate-100 bg-slate-50 p-3.5">
+                            <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Est. Annual Cost</span>
+                            <span className="text-base font-extrabold text-emerald-600 mt-1 block">
+                              RM {tco.estimatedAnnualCost.toFixed(2)}
+                            </span>
+                            <span className="text-[10px] text-slate-400">/ 12 months</span>
+                          </div>
+                        </div>
+                      </div>
+                    </div>
+
+                    {/* 2. EXPENSE CATEGORY DISTRIBUTION */}
+                    <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
+                      <div className="flex items-center justify-between mb-4">
+                        <h4 className="font-bold text-slate-800 text-sm md:text-base">
+                          Maintenance Expense Distribution
+                        </h4>
+                        <span className="text-xs text-slate-400">Total Spent: RM {totalSpent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
+                      </div>
+
+                      {/* VISUAL PROPORTION BAR */}
+                      <div className="h-4 w-full rounded-full bg-slate-100 flex overflow-hidden gap-0.5 mb-6">
+                        {tco.categoryBreakdown.map((cat, idx) => (
+                          cat.percentage > 0 && (
+                            <div 
+                              key={idx} 
+                              style={{ width: `${cat.percentage}%` }} 
+                              className={`${cat.color} transition-all duration-500`}
+                              title={`${cat.category}: ${cat.percentage}%`}
+                            />
+                          )
+                        ))}
+                      </div>
+
+                      {/* CATEGORY GRID */}
+                      <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
+                        {tco.categoryBreakdown.map((cat, idx) => (
+                          <div key={idx} className="rounded-xl border border-slate-100 bg-[#fafcfd] p-4">
+                            <div className="flex items-center justify-between">
+                              <span className="text-xs font-bold text-slate-600">{cat.category}</span>
+                              <span className="text-xs font-black text-slate-900">{cat.percentage}%</span>
+                            </div>
+                            <div className="mt-2 text-lg font-black text-slate-800">
+                              RM {cat.amount.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
+                            </div>
+                            <div className="mt-2 flex items-center gap-1.5">
+                              <span className={`h-2 w-2 rounded-full ${cat.color}`}></span>
+                              <span className="text-[10px] text-slate-400">of total repairs</span>
+                            </div>
+                          </div>
+                        ))}
+                      </div>
+                    </div>
+
+                    {/* 3. RESALE VALUE ADVISORY */}
+                    <div className="rounded-2xl border border-slate-200 bg-slate-900 text-white p-6 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
+                      <div>
+                        <div className="flex items-center gap-2">
+                          <span className="rounded bg-emerald-500/20 px-2 py-0.5 text-[10px] font-bold text-emerald-400 uppercase tracking-wider">
+                            Resale Value Protector
+                          </span>
+                          <span className="text-xs text-slate-400">OtoRekod Passport Certificate</span>
+                        </div>
+                        <h4 className="mt-1 text-base font-bold text-white">
+                          Your vehicle has {receipts.length} verified maintenance milestones.
+                        </h4>
+                        <p className="text-xs text-slate-400 mt-1 max-w-xl">
+                          Cars with documented service histories command a <strong>RM 2,000 – RM 5,000 premium</strong> on Malaysian second-hand marketplaces compared to unverified units.
+                        </p>
+                      </div>
+
+                      <button 
+                        onClick={handleCopyLink}
+                        className="w-full md:w-auto shrink-0 rounded-xl bg-emerald-500 hover:bg-emerald-600 px-5 py-3 text-xs font-bold text-slate-950 transition shadow-sm"
+                      >
+                        {copied ? "Link Copied!" : "Share Verified Passport"}
+                      </button>
+                    </div>
+
+                  </div>
+                );
+              })()
             )}
           </div>
         ) : (
