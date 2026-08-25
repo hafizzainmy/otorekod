@@ -23,7 +23,10 @@ import {
   ShieldCheck,
   Phone,
   MapPin,
-  AlertCircle
+  AlertCircle,
+  Car,
+  ExternalLink,
+  AlertTriangle
 } from "lucide-react";
 
 interface Vehicle {
@@ -55,6 +58,7 @@ interface Receipt {
   items_summary: string;
   invoice_no?: string;
   category?: string;
+  image_url?: string;
 }
 
 interface ServiceForecast {
@@ -77,7 +81,6 @@ interface TCOAnalytics {
     amount: number;
     percentage: number;
     color: string;
-    iconColor: string;
   }[];
   benchmarkComparison: {
     status: "below" | "average" | "above";
@@ -103,6 +106,19 @@ export default function Dashboard() {
   const [showUploadForm, setShowUploadForm] = useState(false);
   const [scanning, setScanning] = useState(false);
 
+  // Original Invoice Image state for upload & preview
+  const [uploadedBase64, setUploadedBase64] = useState<string>("");
+  const [previewImageUrl, setPreviewImageUrl] = useState<string | null>(null);
+
+  // Garage Modal State
+  const [showAddVehicleModal, setShowAddVehicleModal] = useState(false);
+  const [newPlate, setNewPlate] = useState("");
+  const [newMake, setNewMake] = useState("");
+  const [newModel, setNewModel] = useState("");
+  const [newYear, setNewYear] = useState(new Date().getFullYear());
+  const [newInitialOdometer, setNewInitialOdometer] = useState("");
+  const [savingVehicle, setSavingVehicle] = useState(false);
+
   // Form states for receipt insertion
   const [newDate, setNewDate] = useState("");
   const [newOdometer, setNewOdometer] = useState("");
@@ -120,8 +136,9 @@ export default function Dashboard() {
     { description: "", quantity: 1, unit_price: 0, total: 0 }
   ]);
 
+  // Load Vehicles on Initial Mount
   useEffect(() => {
-    async function fetchData() {
+    async function fetchInitialData() {
       const { data: { user } } = await supabase.auth.getUser();
       if (!user) {
         router.push("/login");
@@ -137,33 +154,80 @@ export default function Dashboard() {
       if (dbVehicles && dbVehicles.length > 0) {
         setVehicles(dbVehicles);
         setActiveVehicle(dbVehicles[0]);
-
-        const { data: dbReceipts } = await supabase
-          .from("receipts")
-          .select("*")
-          .eq("vehicle_id", dbVehicles[0].id)
-          .order("service_date", { ascending: false });
-
-        if (dbReceipts) {
-          const categorized = dbReceipts.map((r) => {
-            const itemsLower = (r.items_summary || "").toLowerCase();
-            let category = "Service";
-            if (itemsLower.includes("brek") || itemsLower.includes("brake") || itemsLower.includes("pad")) {
-              category = "Brakes";
-            } else if (itemsLower.includes("tayar") || itemsLower.includes("tyre") || itemsLower.includes("alignment")) {
-              category = "Tyres";
-            } else if (itemsLower.includes("enjin") || itemsLower.includes("gearbox") || itemsLower.includes("major")) {
-              category = "Major";
-            }
-            return { ...r, category };
-          });
-          setReceipts(categorized);
-        }
+        await loadReceiptsForVehicle(dbVehicles[0].id);
       }
       setLoading(false);
     }
-    fetchData();
+    fetchInitialData();
   }, [router]);
+
+  // Load receipts when active vehicle changes
+  const loadReceiptsForVehicle = async (vehicleId: string) => {
+    const { data: dbReceipts } = await supabase
+      .from("receipts")
+      .select("*")
+      .eq("vehicle_id", vehicleId)
+      .order("service_date", { ascending: false });
+
+    if (dbReceipts) {
+      const categorized = dbReceipts.map((r) => {
+        const itemsLower = (r.items_summary || "").toLowerCase();
+        let category = "Service";
+        if (itemsLower.includes("brek") || itemsLower.includes("brake") || itemsLower.includes("pad")) {
+          category = "Brakes";
+        } else if (itemsLower.includes("tayar") || itemsLower.includes("tyre") || itemsLower.includes("alignment")) {
+          category = "Tyres";
+        } else if (itemsLower.includes("enjin") || itemsLower.includes("gearbox") || itemsLower.includes("major")) {
+          category = "Major";
+        }
+        return { ...r, category };
+      });
+      setReceipts(categorized);
+    } else {
+      setReceipts([]);
+    }
+  };
+
+  const handleSwitchVehicle = async (vehicle: Vehicle) => {
+    setActiveVehicle(vehicle);
+    await loadReceiptsForVehicle(vehicle.id);
+  };
+
+  // Add New Vehicle Handler
+  const handleAddVehicle = async (e: React.FormEvent) => {
+    e.preventDefault();
+    if (savingVehicle) return;
+
+    setSavingVehicle(true);
+    const { data: { user } } = await supabase.auth.getUser();
+    if (!user) return;
+
+    const { data: createdVehicle, error } = await supabase.from("vehicles").insert({
+      user_id: user.id,
+      plate_number: newPlate.toUpperCase().trim(),
+      make: newMake.trim(),
+      model: newModel.trim(),
+      year: Number(newYear) || new Date().getFullYear(),
+      current_odometer: parseInt(newInitialOdometer, 10) || 0
+    }).select().single();
+
+    if (!error && createdVehicle) {
+      const updatedVehicles = [createdVehicle, ...vehicles];
+      setVehicles(updatedVehicles);
+      setActiveVehicle(createdVehicle);
+      setReceipts([]);
+      setShowAddVehicleModal(false);
+      
+      // Reset form
+      setNewPlate("");
+      setNewMake("");
+      setNewModel("");
+      setNewInitialOdometer("");
+    } else {
+      alert(error?.message || "Failed to register vehicle.");
+    }
+    setSavingVehicle(false);
+  };
 
   const handleSignOut = async () => {
     await supabase.auth.signOut();
@@ -285,32 +349,28 @@ export default function Dashboard() {
         amount: serviceSum,
         percentage: totalSpent > 0 ? Math.round((serviceSum / totalSpent) * 100) : 0,
         color: "bg-emerald-500",
-        iconColor: "text-emerald-600"
       },
       {
         category: "Braking System",
         amount: brakesSum,
         percentage: totalSpent > 0 ? Math.round((brakesSum / totalSpent) * 100) : 0,
         color: "bg-amber-500",
-        iconColor: "text-amber-600"
       },
       {
         category: "Tyres & Alignment",
         amount: tyresSum,
         percentage: totalSpent > 0 ? Math.round((tyresSum / totalSpent) * 100) : 0,
         color: "bg-purple-500",
-        iconColor: "text-purple-600"
       },
       {
         category: "Major & Transmission",
         amount: majorSum,
         percentage: totalSpent > 0 ? Math.round((majorSum / totalSpent) * 100) : 0,
         color: "bg-blue-500",
-        iconColor: "text-blue-600"
       },
     ];
 
-    const MY_BENCHMARK_CPK = 0.045; // Malaysian national average RM 0.045 / km
+    const MY_BENCHMARK_CPK = 0.045;
     const diff = ((costPerKm - MY_BENCHMARK_CPK) / MY_BENCHMARK_CPK) * 100;
     
     let benchmarkComparison: TCOAnalytics["benchmarkComparison"];
@@ -380,7 +440,7 @@ export default function Dashboard() {
     });
   };
 
-  // Helper to convert PDF to Image directly on browser
+  // Helper to convert PDF to Image on browser
   const convertPdfToImage = async (file: File): Promise<string> => {
     return new Promise(async (resolve, reject) => {
       try {
@@ -417,6 +477,38 @@ export default function Dashboard() {
     });
   };
 
+  // Helper to upload base64 image to Supabase Storage
+  const uploadToSupabaseStorage = async (base64String: string, vehicleId: string): Promise<string | null> => {
+    try {
+      const byteCharacters = atob(base64String);
+      const byteNumbers = new Array(byteCharacters.length);
+      for (let i = 0; i < byteCharacters.length; i++) {
+        byteNumbers[i] = byteCharacters.charCodeAt(i);
+      }
+      const byteArray = new Uint8Array(byteNumbers);
+      const blob = new Blob([byteArray], { type: "image/jpeg" });
+
+      const fileName = `${vehicleId}/${Date.now()}_invoice.jpg`;
+      const { data, error } = await supabase.storage
+        .from("receipts-bucket")
+        .upload(fileName, blob, { contentType: "image/jpeg", upsert: true });
+
+      if (error || !data) {
+        console.warn("Storage upload warning:", error);
+        return null;
+      }
+
+      const { data: publicUrlData } = supabase.storage
+        .from("receipts-bucket")
+        .getPublicUrl(fileName);
+
+      return publicUrlData.publicUrl;
+    } catch (e) {
+      console.error("Storage helper error:", e);
+      return null;
+    }
+  };
+
   // Main AI Scanner
   const handleAIScan = async (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
@@ -432,6 +524,8 @@ export default function Dashboard() {
         base64File = await compressImage(file);
       }
 
+      setUploadedBase64(base64File);
+
       const res = await fetch("/api/scan", {
         method: "POST",
         headers: { "Content-Type": "application/json" },
@@ -441,6 +535,19 @@ export default function Dashboard() {
       const data = await res.json();
 
       if (!res.ok) throw new Error(data.error || "Failed to scan file");
+
+      // DUPLICATE PRE-CHECK (CHECK 1: Strict Check on scanned invoice)
+      if (data.invoice_no && data.service_date && activeVehicle) {
+        const isDuplicate = receipts.some(r => 
+          r.invoice_no?.toLowerCase().trim() === data.invoice_no.toLowerCase().trim() &&
+          r.service_date === data.service_date
+        );
+        if (isDuplicate) {
+          alert(`⚠️ DUPLICATE DETECTED: Invoice #${data.invoice_no} dated ${data.service_date} is already saved for this vehicle. This upload will be canceled.`);
+          setScanning(false);
+          return;
+        }
+      }
 
       if (data.invoice_no) setNewInvoiceNo(data.invoice_no);
       if (data.service_date) setNewDate(data.service_date);
@@ -503,6 +610,7 @@ export default function Dashboard() {
     return lineItems.reduce((sum, item) => sum + item.total, 0);
   };
 
+  // Add Receipt & Store in Supabase
   const handleAddReceipt = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!activeVehicle || submitting) return;
@@ -512,11 +620,44 @@ export default function Dashboard() {
       return;
     }
 
+    // DUPLICATE CHECK 1: Strict Check
+    if (newInvoiceNo.trim()) {
+      const isExactDuplicate = receipts.some(r => 
+        r.invoice_no?.toLowerCase().trim() === newInvoiceNo.toLowerCase().trim() &&
+        r.service_date === newDate
+      );
+      if (isExactDuplicate) {
+        alert(`❌ REJECTED: Invoice #${newInvoiceNo} on ${newDate} is already recorded in your passport.`);
+        return;
+      }
+    }
+
+    // DUPLICATE CHECK 2: Fuzzy Warning (When Invoice No is blank)
+    const totalCalculated = calculateTotalAmount();
+    const isFuzzyDuplicate = receipts.some(r => 
+      r.service_date === newDate &&
+      Math.abs(Number(r.total_amount) - totalCalculated) < 1.0 &&
+      r.workshop_name.toLowerCase().trim() === newWorkshop.toLowerCase().trim()
+    );
+
+    if (isFuzzyDuplicate) {
+      const confirmProceed = confirm(
+        `⚠️ WARNING: A receipt for RM ${totalCalculated.toFixed(2)} at ${newWorkshop} on ${newDate} already exists. Do you still want to save this duplicate?`
+      );
+      if (!confirmProceed) return;
+    }
+
     setSubmitting(true);
     const { data: { user } } = await supabase.auth.getUser();
     if (!user) return;
 
-    const totalCalculated = calculateTotalAmount();
+    // Upload original image to Supabase Storage if present
+    let storedImageUrl = "";
+    if (uploadedBase64) {
+      const publicUrl = await uploadToSupabaseStorage(uploadedBase64, activeVehicle.id);
+      if (publicUrl) storedImageUrl = publicUrl;
+    }
+
     const serializedItems = JSON.stringify(lineItems);
     const parsedOdo = parseInt(newOdometer, 10) || 0;
 
@@ -532,7 +673,8 @@ export default function Dashboard() {
       workshop_email: newWorkshopEmail,
       invoice_no: newInvoiceNo,
       total_amount: totalCalculated,
-      items_summary: serializedItems
+      items_summary: serializedItems,
+      image_url: storedImageUrl || null
     }).select().single();
 
     if (!error && newRecord) {
@@ -558,8 +700,11 @@ export default function Dashboard() {
       setNewWorkshopPhone("");
       setNewWorkshopEmail("");
       setNewInvoiceNo("");
+      setUploadedBase64("");
       setLineItems([{ description: "", quantity: 1, unit_price: 0, total: 0 }]);
       setShowUploadForm(false);
+    } else {
+      alert(error?.message || "Failed to save invoice.");
     }
     setSubmitting(false);
   };
@@ -611,16 +756,49 @@ export default function Dashboard() {
         className="hidden"
       />
 
-      {/* 2. NAVIGATION HEADER */}
-      <header className="border-b border-slate-200 bg-white px-4 py-4 md:px-8 shadow-sm">
-        <div className="mx-auto max-w-5xl flex items-center justify-between">
+      {/* 2. NAVIGATION HEADER WITH GARAGE SELECTOR */}
+      <header className="border-b border-slate-200 bg-white px-4 py-3 md:px-8 shadow-sm">
+        <div className="mx-auto max-w-5xl flex flex-wrap items-center justify-between gap-3">
+          
+          {/* Logo & Garage Switcher */}
           <div className="flex items-center gap-3">
-            <svg className="h-8 w-8 text-sky-600 fill-current" viewBox="0 0 24 24">
-              <path d="M23.5 13.5c0-.828-.672-1.5-1.5-1.5h-1.072l-1.36-3.393c-.34-.848-1.168-1.407-2.08-1.407H6.512c-.912 0-1.74.559-2.08 1.407l-1.36 3.393H2c-.828 0-1.5.672-1.5 1.5V17c0 .828.672 1.5 1.5 1.5h1.5c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h8c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h1.5c.828 0 1.5-.672 1.5-1.5v-3.5zM6.5 17c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zm11 0c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zM5.512 9h12.976l1.2 3H4.312l1.2-3z" />
-            </svg>
-            <span className="text-xl font-black tracking-tight text-slate-900">OtoRekod</span>
+            <div className="flex items-center gap-2">
+              <svg className="h-7 w-7 text-sky-600 fill-current" viewBox="0 0 24 24">
+                <path d="M23.5 13.5c0-.828-.672-1.5-1.5-1.5h-1.072l-1.36-3.393c-.34-.848-1.168-1.407-2.08-1.407H6.512c-.912 0-1.74.559-2.08 1.407l-1.36 3.393H2c-.828 0-1.5.672-1.5 1.5V17c0 .828.672 1.5 1.5 1.5h1.5c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h8c0 .828.672 1.5 1.5 1.5s1.5-.672 1.5-1.5h1.5c.828 0 1.5-.672 1.5-1.5v-3.5zM6.5 17c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zm11 0c-.552 0-1-.448-1-1s.448-1 1-1 1 .448 1 1-.448 1-1 1zM5.512 9h12.976l1.2 3H4.312l1.2-3z" />
+              </svg>
+              <span className="text-lg font-black tracking-tight text-slate-900 hidden sm:inline">OtoRekod</span>
+            </div>
+
+            {/* Garage Dropdown Selector */}
+            {activeVehicle && (
+              <div className="flex items-center gap-1.5 bg-slate-100 p-1 rounded-xl border border-slate-200">
+                <select
+                  value={activeVehicle.id}
+                  onChange={(e) => {
+                    const selected = vehicles.find(v => v.id === e.target.value);
+                    if (selected) handleSwitchVehicle(selected);
+                  }}
+                  className="bg-transparent text-xs font-black text-slate-800 pr-2 pl-2 py-1 focus:outline-none cursor-pointer"
+                >
+                  {vehicles.map((v) => (
+                    <option key={v.id} value={v.id}>
+                      🚗 {v.plate_number} ({v.make} {v.model})
+                    </option>
+                  ))}
+                </select>
+
+                <button
+                  onClick={() => setShowAddVehicleModal(true)}
+                  className="rounded-lg bg-indigo-600 text-white p-1 hover:bg-indigo-700 transition"
+                  title="Add another vehicle to your garage"
+                >
+                  <Plus size={14} />
+                </button>
+              </div>
+            )}
           </div>
 
+          {/* Action Buttons */}
           <div className="flex items-center gap-2">
             <button 
               disabled={scanning}
@@ -628,7 +806,7 @@ export default function Dashboard() {
               className="flex items-center gap-1.5 rounded-lg bg-indigo-600 hover:bg-indigo-700 px-3 py-2 text-xs font-bold text-white shadow-sm transition disabled:opacity-50"
             >
               <Camera size={14} />
-              <span className="hidden sm:inline">Take Photo</span>
+              <span className="hidden sm:inline">Photo</span>
             </button>
 
             <button 
@@ -637,7 +815,7 @@ export default function Dashboard() {
               className="flex items-center gap-1.5 rounded-lg border border-indigo-200 bg-indigo-50 hover:bg-indigo-100 px-3 py-2 text-xs font-bold text-indigo-700 transition disabled:opacity-50"
             >
               <FolderOpen size={14} />
-              <span className="hidden sm:inline">Upload PDF / File</span>
+              <span className="hidden sm:inline">Upload PDF</span>
             </button>
 
             <button 
@@ -658,6 +836,131 @@ export default function Dashboard() {
         </div>
       </header>
 
+      {/* 3. ADD NEW VEHICLE MODAL */}
+      {showAddVehicleModal && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/60 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl p-6 border border-slate-200 shadow-2xl max-w-md w-full">
+            <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-4">
+              <h3 className="font-extrabold text-slate-900 flex items-center gap-2 text-base">
+                <Car className="text-indigo-600" size={18} />
+                Add Vehicle to Garage
+              </h3>
+              <button onClick={() => setShowAddVehicleModal(false)} className="text-slate-400 hover:text-slate-600">
+                <X size={18} />
+              </button>
+            </div>
+
+            <form onSubmit={handleAddVehicle} className="space-y-4">
+              <div>
+                <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Plate Number *</label>
+                <input 
+                  type="text" 
+                  required
+                  placeholder="e.g. VEE 8899"
+                  value={newPlate}
+                  onChange={e => setNewPlate(e.target.value)}
+                  className="w-full rounded-lg border border-slate-200 p-2.5 text-sm uppercase font-mono font-bold focus:border-indigo-500 focus:outline-none"
+                />
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Make (Brand) *</label>
+                  <input 
+                    type="text" 
+                    required
+                    placeholder="e.g. Perodua / Honda"
+                    value={newMake}
+                    onChange={e => setNewMake(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Model *</label>
+                  <input 
+                    type="text" 
+                    required
+                    placeholder="e.g. Myvi / City"
+                    value={newModel}
+                    onChange={e => setNewModel(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Manufacturing Year</label>
+                  <input 
+                    type="number" 
+                    value={newYear}
+                    onChange={e => setNewYear(Number(e.target.value))}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+                <div>
+                  <label className="block text-xs font-bold text-slate-500 uppercase mb-1">Current Odometer (KM)</label>
+                  <input 
+                    type="number" 
+                    placeholder="e.g. 45000"
+                    value={newInitialOdometer}
+                    onChange={e => setNewInitialOdometer(e.target.value)}
+                    className="w-full rounded-lg border border-slate-200 p-2.5 text-sm focus:border-indigo-500 focus:outline-none"
+                  />
+                </div>
+              </div>
+
+              <div className="pt-2 flex gap-3">
+                <button
+                  type="button"
+                  onClick={() => setShowAddVehicleModal(false)}
+                  className="w-1/2 rounded-lg border border-slate-200 py-2.5 text-xs font-bold text-slate-500 hover:bg-slate-50"
+                >
+                  Cancel
+                </button>
+                <button
+                  type="submit"
+                  disabled={savingVehicle}
+                  className="w-1/2 rounded-lg bg-indigo-600 hover:bg-indigo-700 py-2.5 text-xs font-bold text-white shadow-sm"
+                >
+                  {savingVehicle ? "Registering..." : "Add Vehicle"}
+                </button>
+              </div>
+            </form>
+          </div>
+        </div>
+      )}
+
+      {/* 4. ORIGINAL INVOICE IMAGE PREVIEW MODAL */}
+      {previewImageUrl && (
+        <div className="fixed inset-0 z-50 flex items-center justify-center bg-slate-900/80 backdrop-blur-sm p-4 animate-in fade-in">
+          <div className="bg-white rounded-2xl p-4 max-w-2xl w-full flex flex-col max-h-[90vh]">
+            <div className="flex items-center justify-between pb-3 border-b border-slate-100">
+              <h3 className="font-bold text-slate-800 text-sm flex items-center gap-1.5">
+                <FileText size={16} className="text-indigo-600" />
+                Original Verified Workshop Invoice
+              </h3>
+              <button onClick={() => setPreviewImageUrl(null)} className="text-slate-400 hover:text-slate-600">
+                <X size={18} />
+              </button>
+            </div>
+            <div className="overflow-auto my-3 flex-1 flex justify-center bg-slate-50 rounded-xl p-2 border border-slate-100">
+              <img src={previewImageUrl} alt="Original Invoice" className="max-w-full object-contain rounded-lg" />
+            </div>
+            <div className="pt-2 flex justify-end">
+              <a 
+                href={previewImageUrl} 
+                target="_blank" 
+                rel="noreferrer"
+                className="flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-700"
+              >
+                Open in Full Window <ExternalLink size={12} />
+              </a>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* AI Processing Overlay */}
       {scanning && (
         <div className="fixed inset-0 z-50 flex flex-col items-center justify-center bg-slate-900/60 backdrop-blur-sm text-white p-4">
@@ -667,14 +970,14 @@ export default function Dashboard() {
               <Sparkles size={16} className="animate-pulse" />
               OtoRekod AI Auditing...
             </h3>
-            <p className="text-xs text-slate-400 mt-2">Extracting workshop authenticity (SSM, Phone, Address), service date, and expanding part descriptions.</p>
+            <p className="text-xs text-slate-400 mt-2">Extracting workshop authenticity (SSM, Phone, Address), service date, checking duplicate records, and expanding parts.</p>
           </div>
         </div>
       )}
 
       <main className="mx-auto max-w-5xl px-4 py-8 md:px-8">
         
-        {/* 3. DYNAMIC REVIEW & EDIT FORM */}
+        {/* 5. DYNAMIC REVIEW & EDIT FORM */}
         {showUploadForm && activeVehicle && (
           <div className="mb-8 rounded-2xl border-2 border-indigo-200 bg-white p-6 shadow-lg animate-in slide-in-from-top duration-300">
             <div className="flex items-center justify-between border-b border-slate-100 pb-3 mb-5">
@@ -893,7 +1196,7 @@ export default function Dashboard() {
 
         {activeVehicle ? (
           <div>
-            {/* 4. TITLE & SHARE CARD */}
+            {/* 6. TITLE & SHARE CARD */}
             <div className="mb-8 flex flex-col md:flex-row md:items-end md:justify-between gap-6">
               <div>
                 <span className="text-xs font-bold uppercase tracking-widest text-slate-400">Vehicle Passport • Read-Only</span>
@@ -928,7 +1231,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 5. NEXT SERVICE FORECAST CARD */}
+            {/* 7. NEXT SERVICE FORECAST CARD */}
             {(() => {
               const forecast = calculateNextService(activeVehicle, receipts);
               if (!forecast) return null;
@@ -1002,7 +1305,7 @@ export default function Dashboard() {
               );
             })()}
 
-            {/* 6. STAT SUMMARY CARDS */}
+            {/* 8. STAT SUMMARY CARDS */}
             <div className="mb-8 grid grid-cols-2 gap-4 md:grid-cols-4">
               <div className="rounded-xl border border-slate-100 bg-white p-5 shadow-sm">
                 <span className="text-xs font-semibold uppercase tracking-wider text-slate-400">Current Odometer</span>
@@ -1033,7 +1336,7 @@ export default function Dashboard() {
               </div>
             </div>
 
-            {/* 7. NAVIGATION TABS */}
+            {/* 9. NAVIGATION TABS */}
             <div className="mb-6 border-b border-slate-200">
               <nav className="flex gap-6">
                 <button 
@@ -1055,9 +1358,8 @@ export default function Dashboard() {
               </nav>
             </div>
 
-            {/* 8. MAIN CONTENT TABS */}
+            {/* 10. MAIN CONTENT TABS */}
             {activeTab === "timeline" ? (
-              /* TAB 1: TIMELINE */
               <div className="space-y-4">
                 <div className="flex items-center justify-between text-xs text-slate-400 font-semibold mb-2">
                   <span>{receipts.length} verified records • sorted by newest service date</span>
@@ -1127,6 +1429,12 @@ export default function Dashboard() {
                               {receipt.invoice_no && (
                                 <span className="text-[10px] font-semibold text-slate-400 bg-slate-50 border border-slate-100 px-1.5 py-0.5 rounded">
                                   #{receipt.invoice_no}
+                                </span>
+                              )}
+
+                              {receipt.image_url && (
+                                <span className="text-[10px] font-bold text-indigo-600 bg-indigo-50 border border-indigo-100 px-1.5 py-0.5 rounded flex items-center gap-1">
+                                  <FileText size={10} /> Verified Copy
                                 </span>
                               )}
                             </div>
@@ -1220,6 +1528,19 @@ export default function Dashboard() {
                                 </ul>
                               )}
                             </div>
+
+                            {/* View Original Copy Button */}
+                            {receipt.image_url && (
+                              <div className="pt-2 flex justify-end">
+                                <button
+                                  onClick={() => setPreviewImageUrl(receipt.image_url || null)}
+                                  className="flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-700 bg-indigo-50 border border-indigo-100 px-3 py-1.5 rounded-lg transition"
+                                >
+                                  <FileText size={14} /> View Original Stamped Invoice
+                                </button>
+                              </div>
+                            )}
+
                           </div>
                         </div>
                       )}
@@ -1228,7 +1549,7 @@ export default function Dashboard() {
                 })}
               </div>
             ) : (
-              /* TAB 2: MALAYSIAN TCO & COST-PER-KM ANALYTICS */
+              /* TAB 2: ANALYTICS */
               (() => {
                 const tco = calculateTCO(activeVehicle, receipts);
                 if (!tco) {
@@ -1246,8 +1567,6 @@ export default function Dashboard() {
 
                 return (
                   <div className="space-y-6">
-                    
-                    {/* 1. TOP EFFICIENCY & COST-PER-KM HERO CARD */}
                     <div className="rounded-2xl border-2 border-slate-200/80 bg-white p-6 shadow-sm">
                       <div className="flex flex-col md:flex-row md:items-center md:justify-between gap-6">
                         <div>
@@ -1274,7 +1593,6 @@ export default function Dashboard() {
                           </div>
                         </div>
 
-                        {/* QUICK BENCHMARK STATS */}
                         <div className="grid grid-cols-2 gap-3 md:w-80">
                           <div className="rounded-xl border border-slate-100 bg-slate-50 p-3.5">
                             <span className="text-[10px] font-bold uppercase tracking-wider text-slate-400 block">Avg Bill / Visit</span>
@@ -1295,7 +1613,6 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    {/* 2. EXPENSE CATEGORY DISTRIBUTION */}
                     <div className="rounded-2xl border border-slate-200 bg-white p-6 shadow-sm">
                       <div className="flex items-center justify-between mb-4">
                         <h4 className="font-bold text-slate-800 text-sm md:text-base">
@@ -1304,7 +1621,6 @@ export default function Dashboard() {
                         <span className="text-xs text-slate-400">Total Spent: RM {totalSpent.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}</span>
                       </div>
 
-                      {/* VISUAL PROPORTION BAR */}
                       <div className="h-4 w-full rounded-full bg-slate-100 flex overflow-hidden gap-0.5 mb-6">
                         {tco.categoryBreakdown.map((cat, idx) => (
                           cat.percentage > 0 && (
@@ -1318,7 +1634,6 @@ export default function Dashboard() {
                         ))}
                       </div>
 
-                      {/* CATEGORY GRID */}
                       <div className="grid grid-cols-2 md:grid-cols-4 gap-4">
                         {tco.categoryBreakdown.map((cat, idx) => (
                           <div key={idx} className="rounded-xl border border-slate-100 bg-[#fafcfd] p-4">
@@ -1338,7 +1653,6 @@ export default function Dashboard() {
                       </div>
                     </div>
 
-                    {/* 3. RESALE VALUE ADVISORY */}
                     <div className="rounded-2xl border border-slate-200 bg-slate-900 text-white p-6 shadow-sm flex flex-col md:flex-row items-center justify-between gap-4">
                       <div>
                         <div className="flex items-center gap-2">
@@ -1371,8 +1685,14 @@ export default function Dashboard() {
         ) : (
           <div className="rounded-xl border-2 border-dashed border-slate-200 bg-white p-12 text-center text-slate-500 shadow-sm">
             <Wrench size={36} className="mx-auto text-slate-300 mb-3" />
-            <h4 className="font-bold text-slate-800 mb-1">No Vehicles Registered</h4>
-            <p className="text-sm text-slate-400 mb-4">Please register a vehicle on your profile dashboard to begin tracking maintenance histories.</p>
+            <h4 className="font-bold text-slate-800 mb-1">No Vehicles in Garage</h4>
+            <p className="text-sm text-slate-400 mb-4">Click below to add your first vehicle to OtoRekod.</p>
+            <button 
+              onClick={() => setShowAddVehicleModal(true)}
+              className="inline-flex items-center gap-1.5 rounded-lg bg-indigo-600 px-4 py-2 text-xs font-bold text-white hover:bg-indigo-700 transition"
+            >
+              <Plus size={14} /> Add First Vehicle
+            </button>
           </div>
         )}
       </main>
