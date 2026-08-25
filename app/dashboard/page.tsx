@@ -1445,7 +1445,22 @@ export default function Dashboard() {
                           </div>
                         </div>
 
-                        <div className="flex items-center gap-4">
+                        {/* Updated Action & Price Section */}
+                        <div className="flex items-center gap-3">
+                          {receipt.image_url && (
+                            <button
+                              type="button"
+                              onClick={(e) => {
+                                e.stopPropagation(); // Prevents toggling accordion
+                                setPreviewImageUrl(receipt.image_url || null);
+                              }}
+                              className="hidden sm:inline-flex items-center gap-1 rounded-lg border border-indigo-200 bg-indigo-50 px-2.5 py-1 text-[11px] font-bold text-indigo-700 hover:bg-indigo-100 shadow-sm"
+                              title="View Original Stamped Receipt"
+                            >
+                              <FileText size={12} /> View Invoice
+                            </button>
+                          )}
+
                           <span className="text-lg font-extrabold text-slate-900">
                             RM {Number(receipt.total_amount).toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
                           </span>
